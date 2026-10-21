@@ -2689,12 +2689,14 @@ name = "orquestra-runner"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "libc",
+ "directories",
+ "nix",
  "orquestra-core",
  "portable-pty",
  "serde_json",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "vte",
 ]
