@@ -13,12 +13,15 @@ bytes.workspace = true
 tracing.workspace = true
 portable-pty.workspace = true
 vte.workspace = true
-libc.workspace = true
 serde_json.workspace = true
+directories.workspace = true
+# Mesma versão que o portable-pty já usa; só liga os sinais (kill/killpg sem unsafe).
+nix = { version = "0.28", default-features = false, features = ["signal"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 tempfile.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true
