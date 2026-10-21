@@ -186,17 +186,20 @@ impl OrchestratorGateway for McpGateway {
         );
         let exe = &shared.exe;
         let socket = shared.socket.path.to_string_lossy().into_owned();
+        let env = BTreeMap::from([
+            (conventions::env::SOCKET.to_owned(), socket),
+            (conventions::env::TOKEN.to_owned(), token),
+        ]);
         Ok(OrchestratorGrant {
             mcp: McpServerSpec {
                 name: conventions::MCP_SERVER_NAME.to_owned(),
                 command: exe.clone(),
                 args: vec!["mcp".to_owned()],
-                env: BTreeMap::new(),
+                // Também no spec: o Codex não repassa o ambiente do agente
+                // aos servidores MCP, só o que estiver aqui.
+                env: env.clone(),
             },
-            env: BTreeMap::from([
-                (conventions::env::SOCKET.to_owned(), socket),
-                (conventions::env::TOKEN.to_owned(), token),
-            ]),
+            env,
             stop_hook: Some(format!("{} hook stop", shell_quote(exe))),
         })
     }

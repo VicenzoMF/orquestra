@@ -215,7 +215,7 @@ async fn grant_gives_spec_env_and_hook_and_revoke_invalidates() {
     let grant = h.gw.grant(h.session, h.orq).unwrap();
     assert_eq!(grant.mcp.name, conventions::MCP_SERVER_NAME);
     assert_eq!(grant.mcp.args, ["mcp"]);
-    assert!(grant.mcp.env.is_empty());
+    assert_eq!(grant.mcp.env, grant.env);
     let exe = std::env::current_exe().unwrap();
     assert_eq!(grant.mcp.command, exe.to_string_lossy());
     assert_eq!(

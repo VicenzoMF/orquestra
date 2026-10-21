@@ -171,6 +171,10 @@ fn claude_settings(stop_hook: Option<&str>) -> String {
     .to_string()
 }
 
+/// Teto das chamadas ao MCP `orquestra` no Codex: acima do maior `wait_for`
+/// razoável (o padrão da ferramenta é 600 s).
+const ORQUESTRA_TOOL_TIMEOUT_SECS: u32 = 3_700;
+
 fn codex_args(req: &SpawnRequest, prompt: Option<&str>) -> Vec<String> {
     let orchestrator = req.config.role == AgentRole::Orchestrator;
     let mut args = Vec::new();
@@ -190,6 +194,11 @@ fn codex_args(req: &SpawnRequest, prompt: Option<&str>) -> Vec<String> {
             set(
                 &format!("{base}.default_tools_approval_mode"),
                 toml_string("approve"),
+            );
+            // O padrão do Codex (300 s) cortaria um `wait_for` longo.
+            set(
+                &format!("{base}.tool_timeout_sec"),
+                ORQUESTRA_TOOL_TIMEOUT_SECS.to_string(),
             );
         }
     }
@@ -562,6 +571,11 @@ mod tests {
             Some("approve")
         );
         assert!(!o.contains_key("mcp_servers.browser.default_tools_approval_mode"));
+        assert_eq!(
+            o["mcp_servers.orquestra.tool_timeout_sec"].as_integer(),
+            Some(i64::from(ORQUESTRA_TOOL_TIMEOUT_SECS))
+        );
+        assert!(!o.contains_key("mcp_servers.browser.tool_timeout_sec"));
     }
 
     #[test]
