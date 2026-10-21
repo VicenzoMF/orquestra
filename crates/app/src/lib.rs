@@ -9,5 +9,7 @@ pub mod fonts;
 pub mod layout;
 pub mod mock;
 pub mod model;
+pub mod sysinfo;
 pub mod term;
 pub mod theme;
+pub mod ui;

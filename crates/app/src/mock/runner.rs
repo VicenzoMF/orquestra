@@ -264,6 +264,14 @@ impl Session {
                         self.agent.emit(format!("{BOLD}●{RESET} {on_no}\r\n"));
                     }
                 }
+                Step::Hold => loop {
+                    let Some(data) = self.input.recv().await else {
+                        return std::future::pending().await;
+                    };
+                    if let Some(line) = self.typed(&data) {
+                        self.ack(&line);
+                    }
+                },
                 Step::Exit(code) => {
                     let status = if code == 0 {
                         AgentStatus::Done { exit_code: Some(0) }

@@ -122,7 +122,9 @@ impl Page {
         draw_text(&mut img, 24, 22, "LOJA", 3, [0xff, 0xff, 0xff]);
         let nav = "PRODUTOS   CARRINHO   ENTRAR";
         let nx = w as i32 - text_width(nav, 2) as i32 - 24;
-        draw_text(&mut img, nx, 26, nav, 2, [0xc8, 0xd0, 0xdc]);
+        if nx > 24 + text_width("LOJA", 3) as i32 + 24 {
+            draw_text(&mut img, nx, 26, nav, 2, [0xc8, 0xd0, 0xdc]);
+        }
 
         match self.path() {
             "/login" | "/" => self.render_login(&mut img),

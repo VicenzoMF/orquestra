@@ -28,6 +28,9 @@ pub enum Step {
     Ask { prompt: String, on_no: String },
     /// Termina o processo com este código.
     Exit(i32),
+    /// Fica `Running` sem saída (como um orquestrador bloqueado em
+    /// `wait_for`), respondendo só ao que for digitado.
+    Hold,
 }
 
 use Step::*;
@@ -54,7 +57,7 @@ fn say(text: &str) -> Step {
 }
 
 fn claude_banner(cwd: &str, prompt: &str) -> Vec<Step> {
-    let width: usize = 58;
+    let width: usize = 52;
     let row = |text: &str| {
         let pad = (width - 3).saturating_sub(visible_len(text));
         format!(
@@ -201,6 +204,7 @@ fn orchestrator(kind: AgentKind, prompt: &str) -> Vec<Step> {
     s.push(say(
         "Parte das tarefas está pronta; sigo acompanhando as demais.",
     ));
+    s.push(Hold);
     s
 }
 
