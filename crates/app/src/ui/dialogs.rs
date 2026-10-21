@@ -320,7 +320,7 @@ fn new_orchestration(
             for c in commands {
                 cx.send(c);
             }
-            st.select(orchestrator);
+            st.select_new(orchestrator);
             action = Some(Action::Created {
                 session: session_id,
                 repo: repo.clone(),
@@ -417,7 +417,7 @@ fn solo_agent(ui: &mut Ui, cx: &Ctx, st: &mut UiState, d: &mut SoloAgent, close:
                 st.spawn_size(),
             );
             cx.send(cmd);
-            st.select(id);
+            st.select_new(id);
             *close = true;
         }
         if ui.button("Cancelar").clicked() {

@@ -183,6 +183,10 @@ pub fn show(
 ) {
     toolbar(ui, cx, st, cs, dialogs);
     let outer = ui.available_rect_before_wrap();
+    // Janela/painel mudou de tamanho: reajusta se o usuário não assumiu o controle.
+    if cs.auto_fit && (outer.size() - cs.viewport.size()).length() > 1.0 {
+        cs.fit_now = true;
+    }
     cs.viewport = outer;
 
     let structure = structure_hash(cx.model);

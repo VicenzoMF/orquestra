@@ -47,6 +47,8 @@ pub struct UiState {
     pub thumb_browsers: Vec<AgentId>,
     /// Último tamanho do terminal do painel (para o PTY de spawns novos).
     pub last_term_size: Option<TermSize>,
+    /// Agente recém-pedido ao hub e já selecionado; o `Created` ainda não chegou.
+    pub awaiting: Option<(AgentId, std::time::Instant)>,
 }
 
 impl Default for UiState {
@@ -61,6 +63,7 @@ impl Default for UiState {
             panel_browser: None,
             thumb_browsers: Vec::new(),
             last_term_size: None,
+            awaiting: None,
         }
     }
 }
@@ -72,6 +75,12 @@ impl UiState {
             self.tab = SideTab::Terminal;
         }
         self.focus_terminal = true;
+    }
+
+    /// Seleciona um agente que acabou de ser pedido (ainda fora do modelo).
+    pub fn select_new(&mut self, id: AgentId) {
+        self.awaiting = Some((id, std::time::Instant::now()));
+        self.select(id);
     }
 
     /// Tamanho inicial do PTY de um spawn novo.
@@ -123,7 +132,17 @@ impl OrquestraApp {
         shared: Arc<Shared>,
         config: AppConfig,
     ) -> Self {
-        setup_style(&cc.egui_ctx, &config);
+        Self::with_context(&cc.egui_ctx, cmd, shared, config)
+    }
+
+    /// Como `new`, só com o `egui::Context` (testes sem janela).
+    pub fn with_context(
+        ctx: &egui::Context,
+        cmd: CommandSender,
+        shared: Arc<Shared>,
+        config: AppConfig,
+    ) -> Self {
+        setup_style(ctx, &config);
         Self {
             cmd,
             shared,
@@ -228,7 +247,17 @@ fn reconcile_browsers(st: &mut UiState, cx: &Ctx) {
 impl OrquestraApp {
     /// Esquece caches de agentes que saíram do modelo.
     fn gc(&mut self, model: &Model) {
-        if self.st.selected.is_some_and(|id| model.agent(id).is_none()) {
+        if let Some((id, since)) = self.st.awaiting
+            && (model.agent(id).is_some() || since.elapsed() > std::time::Duration::from_secs(10))
+        {
+            self.st.awaiting = None;
+        }
+        let awaited = self.st.awaiting.map(|(id, _)| id);
+        if self
+            .st
+            .selected
+            .is_some_and(|id| model.agent(id).is_none() && Some(id) != awaited)
+        {
             self.st.selected = None;
         }
         if self.st.focus.is_some_and(|id| model.session(id).is_none()) {
@@ -246,6 +275,17 @@ impl OrquestraApp {
 
 impl eframe::App for OrquestraApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        theme::BG.to_normalized_gamma_f32()
+    }
+}
+
+impl OrquestraApp {
+    /// Um frame inteiro da UI.
+    pub fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         if ctx.input(|i| i.viewport().close_requested()) && !self.shutdown_sent {
             self.shutdown_sent = true;
@@ -352,10 +392,6 @@ impl eframe::App for OrquestraApp {
             }
         }
     }
-
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        theme::BG.to_normalized_gamma_f32()
-    }
 }
 
 fn setup_style(ctx: &egui::Context, config: &AppConfig) {
@@ -388,4 +424,119 @@ fn setup_style(ctx: &egui::Context, config: &AppConfig) {
         style.spacing.button_padding = egui::vec2(10.0, 4.0);
         style.spacing.interact_size.y = 26.0;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use egui::{RawInput, Rect, pos2, vec2};
+    use orquestra_core::AppConfig;
+
+    use super::*;
+    use crate::backend::{self, Backend};
+    use crate::feed::lock;
+
+    fn frame(ctx: &egui::Context, app: &mut OrquestraApp) {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1440.0, 900.0))),
+            ..RawInput::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| app.draw(ui));
+        out.textures_delta.clear();
+    }
+
+    /// A UI inteira, sem janela, sobre o hub real com os mocks semeados:
+    /// canvas, painel com terminal e navegador, foco de sessão e diálogos.
+    #[test]
+    fn whole_ui_renders_over_the_mock_hub() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let config = AppConfig::default();
+        let Backend {
+            bus: _bus,
+            cmd,
+            events,
+            frames,
+            hub,
+        } = backend::start_mock(runtime.handle(), &config, 0.02, true);
+        let shared = Shared::new(8, 500);
+        backend::spawn_ui_feeds(
+            runtime.handle(),
+            events,
+            frames,
+            cmd.clone(),
+            shared.clone(),
+            Arc::new(|| {}),
+        );
+        let ctx = egui::Context::default();
+        let mut app = OrquestraApp::with_context(&ctx, cmd.clone(), shared.clone(), config);
+
+        // Espera as duas sessões com todos os workers.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while shared.model().agent_count() < 9 {
+            assert!(std::time::Instant::now() < deadline, "mocks não povoaram");
+            frame(&ctx, &mut app);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for _ in 0..3 {
+            frame(&ctx, &mut app);
+        }
+
+        // Seleciona o agente com navegador: terminal redimensiona ao painel.
+        let qa = {
+            let model = shared.model();
+            model
+                .canvas_order(None)
+                .into_iter()
+                .find(|id| model.agent(*id).is_some_and(|a| a.config.browser))
+                .unwrap()
+        };
+        app.st.select(qa);
+        for _ in 0..3 {
+            frame(&ctx, &mut app);
+        }
+        let size = lock(&shared.term(qa).unwrap()).size();
+        assert_ne!(
+            (size.cols, size.rows),
+            (120, 32),
+            "terminal não acompanhou o painel"
+        );
+
+        // Aba do navegador: o screencast liga quando o navegador está pronto.
+        app.st.tab = SideTab::Browser;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !app.st.streaming.contains(&qa) {
+            assert!(std::time::Instant::now() < deadline, "screencast não ligou");
+            frame(&ctx, &mut app);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Volta ao terminal: o screencast desliga.
+        app.st.tab = SideTab::Terminal;
+        frame(&ctx, &mut app);
+        assert!(!app.st.streaming.contains(&qa));
+
+        // Foco numa sessão (cards detalhados) e os diálogos.
+        let first = shared.model().sessions()[0].id;
+        app.st.focus = Some(first);
+        app.canvas.request_fit();
+        frame(&ctx, &mut app);
+        app.st.selected = None;
+        frame(&ctx, &mut app);
+        app.dialogs.open_new_orchestration(&app.config);
+        frame(&ctx, &mut app);
+        app.dialogs = dialogs::Dialogs::default();
+        app.dialogs.open_settings(&app.config);
+        frame(&ctx, &mut app);
+        assert!(app.dialogs.any_open());
+
+        cmd.send(Command::Shutdown).unwrap();
+        runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(5), hub).await })
+            .expect("hub não encerrou")
+            .unwrap();
+    }
 }
