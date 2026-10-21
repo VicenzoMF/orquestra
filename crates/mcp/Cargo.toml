@@ -18,10 +18,14 @@ uuid.workspace = true
 alacritty_terminal.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
+# Tokens do gateway (CSPRNG do sistema); já está no lock via uuid.
+getrandom = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 tempfile.workspace = true
+# Cliente MCP em memória para testar a ponte.
+rmcp = { workspace = true, features = ["client"] }
 
 [lints]
 workspace = true
