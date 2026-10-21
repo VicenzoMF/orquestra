@@ -4,6 +4,10 @@
 //!
 //! Os parâmetros são os mesmos das ferramentas MCP: a ponte stdio repassa os
 //! argumentos como vieram, e o schema que o LLM vê sai destes tipos.
+//!
+//! O cliente não deve fechar a escrita antes da resposta: o gateway entende
+//! o fim da conexão como desistência e abandona a requisição (um `wait_for`
+//! ou `take_news` cancelado não consome nada).
 
 use orquestra_core::{AgentKind, AgentStatus, QueueReason};
 use schemars::JsonSchema;

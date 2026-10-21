@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, DirBuilder, Permissions};
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -94,12 +94,17 @@ impl McpGateway {
         config: AppConfig,
         socket: SocketFile,
     ) -> Result<Self> {
-        // Um socket velho com o mesmo pid é de um processo morto.
-        let _ = fs::remove_file(&socket.path);
+        // Um socket velho no mesmo caminho é de um processo morto; outro tipo
+        // de arquivo fica (e o bind falha).
+        if fs::symlink_metadata(&socket.path).is_ok_and(|m| m.file_type().is_socket()) {
+            let _ = fs::remove_file(&socket.path);
+        }
         let listener = match UnixListener::bind(&socket.path) {
             Ok(listener) => listener,
             Err(err) => {
-                socket.remove();
+                if let Some(dir) = &socket.owned_dir {
+                    let _ = fs::remove_dir(dir);
+                }
                 return Err(err.into());
             }
         };
@@ -394,6 +399,25 @@ mod tests {
         );
         assert_eq!(shell_quote("/tmp/it's"), r"'/tmp/it'\''s'");
         assert_eq!(shell_quote(""), "''");
+    }
+
+    #[tokio::test]
+    async fn never_deletes_a_file_that_is_not_a_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("importante.txt");
+        fs::write(&path, "dados").unwrap();
+        let (tx, _rx) = orquestra_core::command_channel();
+        let bus = EventBus::new();
+        assert!(
+            McpGateway::start_at(tx.clone(), bus.clone(), AppConfig::default(), &path).is_err()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "dados");
+
+        // Socket velho (processo morto) é substituído.
+        let sock = dir.path().join("velho.sock");
+        drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
+        let gw = McpGateway::start_at(tx, bus, AppConfig::default(), &sock).unwrap();
+        assert_eq!(gw.socket_path(), sock);
     }
 
     #[test]
