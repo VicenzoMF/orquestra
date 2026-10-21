@@ -265,8 +265,6 @@ impl eframe::App for OrquestraApp {
         let model = shared.model();
         self.gc(&model);
         self.shortcuts(&ctx, &model);
-        #[cfg(feature = "screenshot")]
-        self.dev.frame(&ctx, &model, &mut self.st, &mut self.canvas);
 
         let cx = Ctx {
             model: &model,
@@ -274,6 +272,9 @@ impl eframe::App for OrquestraApp {
             cmd: &self.cmd,
             config: &self.config,
         };
+        #[cfg(feature = "screenshot")]
+        self.dev
+            .frame(&ctx, &cx, &mut self.st, &mut self.canvas, &mut self.dialogs);
         self.st.panel_browser = None;
         self.st.thumb_browsers.clear();
 
@@ -332,6 +333,7 @@ impl eframe::App for OrquestraApp {
             match action {
                 dialogs::Action::SaveConfig(config) => {
                     shared.model().max_workers = config.orchestration.max_concurrent_workers;
+                    shared.set_scrollback(config.ui.scrollback_lines);
                     self.config = *config.clone();
                     let _ = self.cmd.send(Command::SaveConfig(config));
                 }

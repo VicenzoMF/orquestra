@@ -623,3 +623,104 @@ fn paint(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use egui::{RawInput, vec2};
+
+    use super::*;
+
+    fn frame(
+        ctx: &Context,
+        events: Vec<Event>,
+        term: &mut AgentTerm,
+        state: &mut ViewState,
+        focus: bool,
+    ) -> TermOutput {
+        let font = TermFont {
+            font: FontId::monospace(13.0),
+            cell: vec2(8.0, 16.0),
+        };
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0))),
+            events,
+            ..RawInput::default()
+        };
+        let mut result = None;
+        let mut out = ctx.run_ui(input, |ui| {
+            let (response, output) = show(ui, Id::unique("term-test"), term, &font, state);
+            if focus {
+                response.request_focus();
+            }
+            result = Some(output);
+        });
+        out.textures_delta.clear();
+        result.unwrap()
+    }
+
+    fn key(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn focused_terminal_turns_keys_into_pty_bytes() {
+        let ctx = Context::default();
+        let mut term = AgentTerm::new(TermSize::default(), 100);
+        let mut state = ViewState::default();
+
+        let first = frame(&ctx, vec![], &mut term, &mut state, true);
+        // 400×200 menos a margem, em células de 8×16.
+        assert_eq!(first.resized.map(|s| (s.cols, s.rows)), Some((48, 11)));
+
+        let ctrl = Modifiers {
+            ctrl: true,
+            command: true,
+            ..Modifiers::NONE
+        };
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let events = vec![
+            Event::Text("ls".to_owned()),
+            key(Key::Enter, Modifiers::NONE),
+            key(Key::ArrowUp, Modifiers::NONE),
+            Event::Copy,
+            key(Key::D, ctrl),
+            key(Key::B, alt),
+            Event::Text("b".to_owned()),
+            Event::Paste("x\ny".to_owned()),
+        ];
+        let out = frame(&ctx, events, &mut term, &mut state, false);
+        assert_eq!(out.input, b"ls\r\x1b[A\x03\x04\x1bbx\ry");
+        assert!(out.resized.is_none());
+    }
+
+    #[test]
+    fn unfocused_terminal_ignores_keys_and_paints_content() {
+        let ctx = Context::default();
+        let mut term = AgentTerm::new(TermSize::default(), 100);
+        term.on_output(
+            0,
+            b"\x1b[1;31mvermelho\x1b[0m \x1b[7minverso\x1b[0m \xe2\x97\x8f",
+        );
+        let mut state = ViewState::default();
+        let out = frame(
+            &ctx,
+            vec![Event::Text("x".to_owned())],
+            &mut term,
+            &mut state,
+            false,
+        );
+        assert!(out.input.is_empty());
+        // A primeira linha virou galleys (texto) e fundos (inverso).
+        assert!(!state.cache[0].texts.is_empty());
+        assert!(!state.cache[0].bgs.is_empty());
+    }
+}

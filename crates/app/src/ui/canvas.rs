@@ -261,17 +261,21 @@ fn toolbar(
                 if ui.button("Ajustar à tela").clicked() {
                     cs.request_fit();
                 }
+                // Legenda à direita; sem espaço, só os ícones (texto na dica).
+                let full = ui.available_width() > 380.0;
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     for (kind, text) in [
                         (StatusKind::Queued, "na fila"),
                         (StatusKind::Failed, "falhou"),
                         (StatusKind::Done, "pronto"),
-                        (StatusKind::Waiting, "aguardando você"),
+                        (StatusKind::Waiting, "aguardando"),
                         (StatusKind::Running, "rodando"),
                     ] {
                         ui.add_space(4.0);
-                        ui.label(RichText::new(text).size(12.0).color(theme::TEXT_DIM));
-                        widgets::status_icon(ui, kind, 12.0);
+                        if full {
+                            ui.label(RichText::new(text).size(12.0).color(theme::TEXT_DIM));
+                        }
+                        widgets::status_icon(ui, kind, 12.0).on_hover_text(text);
                     }
                 });
             });

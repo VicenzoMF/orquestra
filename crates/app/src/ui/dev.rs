@@ -5,7 +5,8 @@
 //! - `ORQUESTRA_SCREENSHOT_DELAY=segundos` (padrão 14);
 //! - `ORQUESTRA_DEMO_SELECT=nome`: seleciona o agente com esse nome;
 //! - `ORQUESTRA_DEMO_TAB=navegador`: abre a aba do navegador;
-//! - `ORQUESTRA_DEMO_FOCUS=prefixo`: foca a sessão cujo nome começa assim.
+//! - `ORQUESTRA_DEMO_FOCUS=prefixo`: foca a sessão cujo nome começa assim;
+//! - `ORQUESTRA_DEMO_DIALOG=nova|avulso|config`: abre um diálogo.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,8 +16,8 @@ use std::time::{Duration, Instant};
 use egui::ViewportCommand;
 
 use super::canvas::CanvasState;
-use super::{SideTab, UiState};
-use crate::model::Model;
+use super::dialogs::Dialogs;
+use super::{Ctx, SideTab, UiState};
 
 pub struct DevHooks {
     path: Option<PathBuf>,
@@ -25,6 +26,7 @@ pub struct DevHooks {
     select: Option<String>,
     browser_tab: bool,
     focus: Option<String>,
+    dialog: Option<String>,
     prepared: bool,
     requested: bool,
     saved: Arc<AtomicBool>,
@@ -44,6 +46,7 @@ impl DevHooks {
             select: var("ORQUESTRA_DEMO_SELECT"),
             browser_tab: var("ORQUESTRA_DEMO_TAB").is_some_and(|t| t.starts_with("nav")),
             focus: var("ORQUESTRA_DEMO_FOCUS"),
+            dialog: var("ORQUESTRA_DEMO_DIALOG"),
             prepared: false,
             requested: false,
             saved: Arc::new(AtomicBool::new(false)),
@@ -53,16 +56,24 @@ impl DevHooks {
     pub fn frame(
         &mut self,
         ctx: &egui::Context,
-        model: &Model,
+        cx: &Ctx,
         st: &mut UiState,
         canvas: &mut CanvasState,
+        dialogs: &mut Dialogs,
     ) {
+        let model = cx.model;
         let Some(path) = self.path.clone() else {
             return;
         };
         let elapsed = self.start.elapsed();
         if !self.prepared && elapsed >= self.delay.mul_f64(0.7) {
             self.prepared = true;
+            match self.dialog.as_deref() {
+                Some("nova") => dialogs.open_new_orchestration(cx.config),
+                Some("avulso") => dialogs.open_solo(cx, st),
+                Some("config") => dialogs.open_settings(cx.config),
+                _ => {}
+            }
             if let Some(prefix) = &self.focus
                 && let Some(s) = model
                     .sessions()

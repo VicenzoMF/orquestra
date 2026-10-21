@@ -3,6 +3,7 @@
 //! para sempre responder ao PTY) e pede repaint.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use orquestra_core::bytes::Bytes;
@@ -26,7 +27,8 @@ pub struct Shared {
     pub model: Mutex<Model>,
     terms: Mutex<HashMap<AgentId, SharedTerm>>,
     pub frames: Arc<FrameStore>,
-    scrollback: usize,
+    /// Scrollback dos terminais criados daqui em diante.
+    scrollback: AtomicUsize,
 }
 
 impl Shared {
@@ -35,12 +37,16 @@ impl Shared {
             model: Mutex::new(Model::new(max_workers)),
             terms: Mutex::new(HashMap::new()),
             frames: Arc::new(FrameStore::default()),
-            scrollback,
+            scrollback: AtomicUsize::new(scrollback),
         })
     }
 
     pub fn model(&self) -> MutexGuard<'_, Model> {
         lock(&self.model)
+    }
+
+    pub fn set_scrollback(&self, lines: usize) {
+        self.scrollback.store(lines, Ordering::Relaxed);
     }
 
     pub fn term(&self, id: AgentId) -> Option<SharedTerm> {
@@ -50,7 +56,10 @@ impl Shared {
     fn term_or_create(&self, id: AgentId, size: TermSize) -> SharedTerm {
         lock(&self.terms)
             .entry(id)
-            .or_insert_with(|| Arc::new(Mutex::new(AgentTerm::new(size, self.scrollback))))
+            .or_insert_with(|| {
+                let scrollback = self.scrollback.load(Ordering::Relaxed);
+                Arc::new(Mutex::new(AgentTerm::new(size, scrollback)))
+            })
             .clone()
     }
 

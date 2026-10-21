@@ -421,10 +421,21 @@ impl Model {
                 Some(StatusKind::Approval),
             )
         } else if c.running + c.starting > 0 {
-            (
-                format!("{} rodando", c.running + c.starting),
-                Some(StatusKind::Running),
-            )
+            // "N rodando" conta só workers, como o "N agentes" ao lado.
+            let workers = self
+                .agents_of(session)
+                .iter()
+                .filter(|a| {
+                    !a.is_orchestrator()
+                        && matches!(a.kind(), StatusKind::Running | StatusKind::Starting)
+                })
+                .count();
+            let text = if workers == 0 {
+                "orquestrador rodando".to_owned()
+            } else {
+                format!("{workers} rodando")
+            };
+            (text, Some(StatusKind::Running))
         } else if c.queued > 0 {
             (format!("{} na fila", c.queued), Some(StatusKind::Queued))
         } else if c.done > 0 {
@@ -569,6 +580,21 @@ mod tests {
         // Só o worker aguardando ocupa vaga; orquestrador não conta.
         assert_eq!(m.slots_used(), 1);
         assert_eq!(m.session_summary(s).0, "1 aguardando você");
+    }
+
+    #[test]
+    fn running_summary_counts_workers_only() {
+        let mut m = Model::new(8);
+        let (s, ev) = session_created("loja");
+        m.apply(&ev);
+        let (orq, ev) = created(s, "orquestrador", AgentRole::Orchestrator, None);
+        m.apply(&ev);
+        m.apply(&status(orq, AgentStatus::Running));
+        assert_eq!(m.session_summary(s).0, "orquestrador rodando");
+        let (w, ev) = created(s, "w", AgentRole::Worker, Some(orq));
+        m.apply(&ev);
+        m.apply(&status(w, AgentStatus::Running));
+        assert_eq!(m.session_summary(s).0, "1 rodando");
     }
 
     #[test]
