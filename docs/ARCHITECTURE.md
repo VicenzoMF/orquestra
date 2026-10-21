@@ -12,6 +12,8 @@ interagir.
 Layout aprovado (canvas interativo, 4 telas):
 https://claude.ai/artifact/5cuERHSaTLUxzXJ6UPsmoa
 
+Estado: Fases 0, 1 e 2 concluídas (MVP integrado). Como rodar: `README.md`.
+
 ---
 
 ## 1. Princípios
@@ -414,22 +416,40 @@ principal:
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 8. Orçamento de memória (sem navegador)
+## 8. Memória e abertura (medido)
 
-| Item | Estimativa |
-|---|---|
-| eframe + glow + fontes + atlas | 25–35 MB (depende do driver GL) |
-| tokio + hub + canais | < 2 MB |
-| terminal por agente na UI | grade + scrollback até 3000 linhas × cols × 24 B (cresce sob demanda) |
-| `Term` por worker no gateway | scrollback curto (~500 linhas) |
-| replay por agente (runner) | até 1 MiB |
-| SQLite | ~2 MB |
+Release (`lto = "thin"`, binário de 19,4 MB). Medido em Linux com Wayland
+e Intel/Mesa, depois de 10–40 s ocioso, sem navegador aberto, mediana de 3–5
+execuções:
 
-Metas, sem contar os processos dos agentes:
-- ~40 MB de RSS com o app aberto e vazio;
-- abaixo de 100 MB com duas orquestrações e 7 agentes.
+| Cenário | Primeiro quadro | RSS | Privada (anônima) | PSS | CPU parado |
+|---|---|---|---|---|---|
+| Vazio (modo real) | 44 ms | 78,5 MB | 28,2 MB | 69,9 MB | 0 |
+| 2 orquestrações, 9 agentes (`--mock`) | 48 ms | 80,0 MB | 31,8 MB | 71,3 MB | 0 |
+| Vazio com `wgpu` (Vulkan), para comparar | 83 ms | 105,3 MB | 40,2 MB | 97,5 MB | 0 |
 
-## 9. Fase 1 — divisão do trabalho
+- **De onde vem o RSS.** Cerca de 37 MB são o driver OpenGL do Mesa:
+  `libLLVM` (26 MB) e `libgallium` (11 MB). São páginas de arquivo,
+  compartilhadas com outros processos que usam Mesa. O app em si ocupa
+  ~28 MB privados, e cada agente acrescenta pouco, porque o scrollback cresce
+  sob demanda.
+- **`wgpu` não ajuda.** Ele também carrega a `libLLVM` e soma o driver Vulkan.
+  O `glow` fica.
+- **Como medir de novo.** O app loga `primeiro quadro ms=…` no stderr; o
+  script de medição lê `/proc/<pid>/status` e `smaps_rollup`.
+
+## 9. Notas de operação
+
+- **Confiança no Claude Code.** Num repositório em que você nunca rodou o
+  Claude Code, o orquestrador para no aviso "trust this folder". A opção
+  já selecionada é "No, exit". Confirme uma vez no terminal dele. O Claude
+  Code guarda a confiança pela raiz do repositório principal, e os worktrees
+  usam essa mesma raiz: os agentes criados depois não perguntam de novo.
+- **Codex.** O socket e o token vão também no `env` do servidor MCP, porque o
+  Codex não repassa o ambiente. O `tool_timeout_sec` do `orquestra` é 3700 s.
+  Ainda não foi testado com o Codex real (não instalado nesta máquina).
+
+## 10. Fase 1 — divisão do trabalho (histórico)
 
 | Agente | Branch / worktree | Escopo (só mexe aqui) |
 |---|---|---|
