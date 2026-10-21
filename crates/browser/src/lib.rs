@@ -2,5 +2,6 @@
 //! Implementa `orquestra_core::BrowserManager`. Ver `docs/ARCHITECTURE.md`.
 
 mod discovery;
+mod dispatch;
 
 pub use crate::discovery::{ENV_EXECUTABLE, find_executable};
