@@ -3,7 +3,9 @@
 //! Ao fim de cada turno pergunta ao gateway se os filhos têm novidades. Com
 //! novidade (ou filhos ainda trabalhando), devolve `{"decision":"block"}` e o
 //! Claude continua já sabendo; sem nada, escreve a OSC `waiting` no TTY e
-//! deixa parar. Gateway inacessível nunca trava o orquestrador: deixa parar.
+//! deixa parar. Também deixa parar se um `wait_for` já roda em segundo plano
+//! (o Claude Code acorda o orquestrador quando ele voltar). Gateway
+//! inacessível nunca trava o orquestrador: deixa parar.
 
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -29,6 +31,26 @@ const MAX_INPUT: u64 = 1 << 20;
 struct StopInput {
     #[serde(default)]
     stop_hook_active: bool,
+    /// Tarefas em segundo plano do Claude Code. Uma chamada MCP longa (um
+    /// `wait_for` passando de 2 min) vira uma delas e acorda o Claude quando
+    /// termina.
+    #[serde(default)]
+    background_tasks: Vec<BackgroundTask>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BackgroundTask {
+    #[serde(default)]
+    server: Option<String>,
+}
+
+impl StopInput {
+    /// Já há uma chamada nossa (`wait_for`) rodando em segundo plano.
+    fn waiting_in_background(&self) -> bool {
+        self.background_tasks
+            .iter()
+            .any(|t| t.server.as_deref() == Some(conventions::MCP_SERVER_NAME))
+    }
 }
 
 /// O que o hook decide.
@@ -57,19 +79,19 @@ pub fn decide_stop(
     wait_secs: u64,
     mut take_news: impl FnMut(u64) -> Result<NewsReport, String>,
 ) -> StopDecision {
-    let active = serde_json::from_str::<StopInput>(input)
-        .map(|i| i.stop_hook_active)
-        .unwrap_or(false);
+    let input: StopInput = serde_json::from_str(input).unwrap_or_default();
     let Ok(report) = take_news(0) else {
         return StopDecision::AllowStop;
     };
     if !report.news.is_empty() {
         return StopDecision::Block(news_reason(&report));
     }
-    if report.working().next().is_none() {
+    // Ninguém trabalhando, ou um `wait_for` em segundo plano vai acordar o
+    // Claude quando algo mudar.
+    if report.working().next().is_none() || input.waiting_in_background() {
         return StopDecision::AllowStop;
     }
-    if !active {
+    if !input.stop_hook_active {
         return StopDecision::Block(working_reason(&report));
     }
     // Já continuamos uma vez: espera um pouco por novidade em vez de insistir.
@@ -305,6 +327,25 @@ mod tests {
         );
         let (decision, calls) = run(FIRST, vec![Err("inacessível".into())]);
         assert_eq!((decision, calls), (StopDecision::AllowStop, vec![0]));
+    }
+
+    #[test]
+    fn background_wait_for_lets_it_stop() {
+        let working = NewsReport {
+            news: vec![],
+            children: vec![child("a", "running")],
+        };
+        let input = r#"{"stop_hook_active":false,"background_tasks":[
+            {"id":"t1","type":"MCP task","status":"running","server":"orquestra","tool":"wait_for"}]}"#;
+        let (decision, calls) = run(input, vec![Ok(working.clone())]);
+        assert_eq!((decision, calls), (StopDecision::AllowStop, vec![0]));
+
+        // Tarefa de outro servidor não conta.
+        let other = r#"{"background_tasks":[{"id":"t2","type":"shell","command":"sleep 9"}]}"#;
+        assert!(matches!(
+            run(other, vec![Ok(working)]).0,
+            StopDecision::Block(_)
+        ));
     }
 
     #[test]
