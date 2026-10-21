@@ -22,5 +22,10 @@ eframe.workspace = true
 alacritty_terminal.workspace = true
 image.workspace = true
 
+[features]
+# Só para desenvolvimento: ganchos que tiram um screenshot PNG e fecham
+# (ver `src/ui/dev.rs`). O binário normal não leva o codificador PNG.
+screenshot = ["image/png"]
+
 [lints]
 workspace = true
