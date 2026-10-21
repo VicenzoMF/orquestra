@@ -854,3 +854,109 @@ async fn gap_in_output_requests_replay() {
     h.command_seen(|c| matches!(c, Command::RequestReplay { id } if *id == a))
         .await;
 }
+
+#[tokio::test]
+async fn mcp_client_through_bridge_and_socket() {
+    use rmcp::ServiceExt;
+    use rmcp::model::CallToolRequestParams;
+
+    let h = Harness::new().await;
+    let bridge = crate::bridge::OrquestraBridge::new(GatewayClient::new(&h.socket, &h.token));
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        if let Ok(server) = bridge.serve(server_io).await {
+            let _ = server.waiting().await;
+        }
+    });
+    let client = ().serve(client_io).await.unwrap();
+    let args = |v: Value| v.as_object().unwrap().clone();
+
+    let spawned = client
+        .call_tool(
+            CallToolRequestParams::new("spawn_agent")
+                .with_arguments(args(json!({"name": "web", "task": "faça o front"}))),
+        )
+        .await
+        .unwrap();
+    assert_ne!(spawned.is_error, Some(true));
+    let text = &spawned.content[0].as_text().unwrap().text;
+    let reply: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(reply["agent"], "web");
+    assert_eq!(
+        h.spawned_configs()[0].initial_prompt.as_deref(),
+        Some("faça o front")
+    );
+
+    let web = h.gw.shared().lock().resolve(h.session, "web").unwrap();
+    h.bus.publish(AgentEvent::Output {
+        id: web,
+        seq: 0,
+        data: Bytes::from_static(b"\x1b[33mok\x1b[0m\r\n"),
+    });
+    h.eventually(|st| st.screen_lines(web, 1).is_some()).await;
+    let out = client
+        .call_tool(
+            CallToolRequestParams::new("read_output").with_arguments(args(json!({"agent": "web"}))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.content[0].as_text().unwrap().text,
+        "web [starting], últimas 1 linhas:\nok"
+    );
+
+    let err = client
+        .call_tool(
+            CallToolRequestParams::new("kill_agent")
+                .with_arguments(args(json!({"agent": "ninguem"}))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(err.is_error, Some(true));
+    assert_eq!(
+        err.content[0].as_text().unwrap().text,
+        "agente desconhecido: ninguem"
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_hook_against_the_gateway() {
+    use crate::hook::{StopDecision, decide_stop};
+
+    let h = Harness::new().await;
+    let a = h.spawn("a").await;
+    h.status_settled(a, AgentStatus::Running).await;
+    let client = GatewayClient::new(&h.socket, &h.token);
+    let hook = move |input: &'static str, wait: u64| {
+        let client = client.clone();
+        tokio::task::spawn_blocking(move || {
+            decide_stop(input, wait, |secs| {
+                let reply = client.call_blocking(
+                    method::TAKE_NEWS,
+                    json!({"wait_secs": secs}),
+                    Duration::from_secs(secs + 5),
+                )?;
+                serde_json::from_value(reply).map_err(|e| e.to_string())
+            })
+        })
+    };
+
+    let first = hook(r#"{"stop_hook_active":false}"#, 1).await.unwrap();
+    assert!(matches!(first, StopDecision::Block(r) if r.contains("1 agente ainda trabalhando: a")));
+
+    // Continuando e sem novidade em 1 s: deixa parar.
+    let again = hook(r#"{"stop_hook_active":true}"#, 1).await.unwrap();
+    assert_eq!(again, StopDecision::AllowStop);
+
+    // A novidade chega durante a espera do hook.
+    let pending = hook(r#"{"stop_hook_active":true}"#, 5);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    h.status(a, AgentStatus::Done { exit_code: Some(0) });
+    let late = pending.await.unwrap();
+    assert!(matches!(late, StopDecision::Block(r) if r.contains("a (") && r.contains("terminou")));
+
+    // Tudo entregue e ninguém trabalhando: deixa parar.
+    let done = hook(r#"{"stop_hook_active":false}"#, 1).await.unwrap();
+    assert_eq!(done, StopDecision::AllowStop);
+}

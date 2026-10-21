@@ -102,17 +102,20 @@ pub struct ReadOutputParams {
     pub lines: usize,
 }
 
-/// Condição de `wait_for`.
+/// Condição de `wait_for`. No schema vira um `enum` de strings simples (sem
+/// `$ref`/`oneOf`, que nem todo cliente MCP entende); por isso os variantes
+/// não têm doc comment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(inline)]
 pub enum WaitUntil {
-    /// Parou: aguardando input, terminou ou falhou.
+    // Parou: aguardando input, terminou ou falhou.
     Idle,
-    /// Terminou ou falhou (processo encerrado).
+    // Terminou ou falhou (processo encerrado).
     Done,
-    /// Precisa de atenção (aguardando input, aprovação, falhou) ou terminou.
+    // Precisa de atenção (aguardando input, aprovação, falhou) ou terminou.
     Attention,
-    /// Qualquer mudança de status depois da chamada.
+    // Qualquer mudança de status depois da chamada.
     Change,
 }
 
@@ -306,6 +309,18 @@ mod tests {
         assert_eq!(err, json!({"error": "x"}));
         let back: Response = serde_json::from_value(json!({"error": "y"})).unwrap();
         assert_eq!(back.into_result(), Err("y".to_owned()));
+    }
+
+    #[test]
+    fn until_schema_is_a_plain_string_enum() {
+        let schema = serde_json::to_value(schemars::schema_for!(WaitForParams)).unwrap();
+        assert!(schema.get("$defs").is_none(), "{schema}");
+        assert_eq!(schema["properties"]["until"]["type"], "string");
+        assert_eq!(
+            schema["properties"]["until"]["enum"],
+            json!(["idle", "done", "attention", "change"])
+        );
+        assert!(schema["properties"]["until"]["description"].is_string());
     }
 
     #[test]
