@@ -1,6 +1,6 @@
 [package]
 name = "orquestra-app"
-description = "UI egui: só consome eventos e envia comandos."
+description = "Binário `orquestra`: a UI egui e os subcomandos `mcp` e `hook stop`."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 orquestra-core.workspace = true
+orquestra-runner.workspace = true
+orquestra-browser.workspace = true
+orquestra-store.workspace = true
+orquestra-mcp.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
 bytes.workspace = true
 anyhow.workspace = true
@@ -21,6 +25,10 @@ egui.workspace = true
 eframe.workspace = true
 alacritty_terminal.workspace = true
 image.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+serde_json.workspace = true
 
 [features]
 # Só para desenvolvimento: ganchos que tiram um screenshot PNG e fecham
