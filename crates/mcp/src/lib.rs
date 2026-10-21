@@ -16,11 +16,14 @@
 //!
 //! ```ignore
 //! match args {
+//!     // runtime current_thread com `enable_all()` basta
 //!     ["mcp"] => runtime.block_on(orquestra_mcp::run_stdio_bridge())?,
+//!     // síncrono, sem runtime
 //!     ["hook", "stop"] => std::process::exit(orquestra_mcp::run_stop_hook()),
 //!     _ => {
-//!         // dentro do runtime:
+//!         let _guard = runtime.enter(); // `start` sobe tasks e o socket no runtime
 //!         let gateway = McpGateway::start(cmd_tx.clone(), bus.clone(), config.clone())?;
+//!         let gateway_handle = gateway.clone(); // p/ `update_config` após SaveConfig
 //!         // ... Services { gateway, .. }
 //!     }
 //! }

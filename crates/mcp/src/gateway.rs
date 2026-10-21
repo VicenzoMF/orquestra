@@ -29,9 +29,15 @@ const MAX_LINE: u64 = 1 << 20;
 pub(crate) const SHUTTING_DOWN: &str = "o orquestra está encerrando";
 
 /// Gateway do MCP `orquestra`. Criado pelo `main` com `start`, entregue ao hub
-/// em `Services.gateway`. Ao ser descartado (ou no `Shutdown` do hub), para de
-/// atender e apaga o socket.
+/// em `Services.gateway`. Clonar é barato (o `main` pode guardar um clone para
+/// `update_config`). Quando o último clone cai (ou no `Shutdown` do hub), para
+/// de atender e apaga o socket.
+#[derive(Clone)]
 pub struct McpGateway {
+    handle: Arc<Handle>,
+}
+
+struct Handle {
     shared: Arc<Shared>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -128,19 +134,25 @@ impl McpGateway {
             tokio::spawn(run_events(shared.clone(), events)),
             tokio::spawn(run_accept(shared.clone(), listener)),
         ];
-        Ok(Self { shared, tasks })
+        Ok(Self {
+            handle: Arc::new(Handle { shared, tasks }),
+        })
+    }
+
+    fn inner(&self) -> &Arc<Shared> {
+        &self.handle.shared
     }
 
     /// Caminho do socket (o mesmo que vai em `ORQUESTRA_SOCKET`).
     pub fn socket_path(&self) -> &Path {
-        &self.shared.socket.path
+        &self.inner().socket.path
     }
 
     /// Troca a config usada pelo `spawn_agent` (presets). Chame depois de um
     /// `SaveConfig`: o gateway não vê comandos.
     pub fn update_config(&self, config: AppConfig) {
         *self
-            .shared
+            .inner()
             .config
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = config;
@@ -148,11 +160,11 @@ impl McpGateway {
 
     #[cfg(test)]
     pub(crate) fn shared(&self) -> &Arc<Shared> {
-        &self.shared
+        self.inner()
     }
 }
 
-impl Drop for McpGateway {
+impl Drop for Handle {
     fn drop(&mut self) {
         self.shared.close();
         for task in &self.tasks {
@@ -164,15 +176,16 @@ impl Drop for McpGateway {
 impl OrchestratorGateway for McpGateway {
     fn grant(&self, session: SessionId, agent: AgentId) -> Result<OrchestratorGrant> {
         let token = new_token().map_err(|err| Error::Other(format!("gerar token: {err}")))?;
-        self.shared.lock().grant(
+        let shared = self.inner();
+        shared.lock().grant(
             token.clone(),
             Grant {
                 session,
                 orchestrator: agent,
             },
         );
-        let exe = &self.shared.exe;
-        let socket = self.shared.socket.path.to_string_lossy().into_owned();
+        let exe = &shared.exe;
+        let socket = shared.socket.path.to_string_lossy().into_owned();
         Ok(OrchestratorGrant {
             mcp: McpServerSpec {
                 name: conventions::MCP_SERVER_NAME.to_owned(),
@@ -189,7 +202,7 @@ impl OrchestratorGateway for McpGateway {
     }
 
     fn revoke(&self, agent: AgentId) {
-        self.shared.lock().revoke(agent);
+        self.inner().lock().revoke(agent);
     }
 }
 

@@ -808,8 +808,13 @@ async fn socket_round_trip_with_private_permissions() {
     assert!(reply["children"].is_array());
 
     let socket = h.socket.clone();
-    drop(h);
-    assert!(!socket.exists(), "o socket some com o gateway");
+    let Harness { gw, _dir: dir, .. } = h;
+    let keep = gw.clone();
+    drop(gw);
+    assert!(socket.exists(), "um clone ainda vivo mantém o gateway");
+    drop(keep);
+    assert!(!socket.exists(), "o socket some com o último clone");
+    drop(dir);
     let gone = client
         .call(method::LIST_AGENTS, json!({}))
         .await
