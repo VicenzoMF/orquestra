@@ -24,9 +24,6 @@ use crate::state::{Grant, State, WaitSpec};
 
 /// Quanto o `spawn_agent` espera o hub responder com o primeiro status.
 const SPAWN_ACK_TIMEOUT: Duration = Duration::from_secs(5);
-/// Pausa entre o texto e o Enter: TUIs (Claude Code) tratam texto + `\r` no
-/// mesmo pedaço como colagem e não enviam.
-const ENTER_DELAY: Duration = Duration::from_millis(100);
 const MAX_NAME_CHARS: usize = 40;
 
 const HUB_DOWN: &str = "o hub do orquestra não está rodando";
@@ -191,7 +188,7 @@ impl Shared {
                 data: Bytes::from(data),
             })?;
             if p.submit {
-                tokio::time::sleep(ENTER_DELAY).await;
+                tokio::time::sleep(enter_delay(p.text.len())).await;
             }
         }
         if p.submit {
@@ -406,6 +403,13 @@ fn with_note(mut value: Value, note: Option<&str>) -> Value {
         }
     }
     value
+}
+
+/// Pausa entre o texto e o Enter: TUIs (Claude Code) tratam texto + `\r` no
+/// mesmo pedaço como colagem e não enviam. Cresce com o texto, que o PTY
+/// demora mais para escrever.
+fn enter_delay(text_len: usize) -> Duration {
+    Duration::from_millis((100 + text_len as u64 / 20).min(1_000))
 }
 
 /// Nome seguro para branch e para referência: letras, números, `-` e `_`.
