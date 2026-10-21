@@ -22,6 +22,8 @@ tempfile.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tempfile.workspace = true
+# `RUST_LOG=orquestra_browser=debug cargo test` mostra o que o controlador faz.
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
