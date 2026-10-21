@@ -174,6 +174,8 @@ impl Shared {
                 Some(_) => {}
             }
             agent.input_at = Some(Instant::now());
+            // Respondeu: a novidade "aguardando input" deste agente já foi tratada.
+            st.consume_news(grant.orchestrator, &[id]);
             (id, name, st.bracketed_paste(id))
         };
         if !p.text.is_empty() {
@@ -331,13 +333,22 @@ impl Shared {
 
     fn kill_agent(&self, grant: Grant, p: KillAgentParams) -> Result<Value, String> {
         let (id, name, status) = {
-            let st = self.lock();
+            let mut st = self.lock();
             let id = st.resolve(grant.session, &p.agent)?;
             if id == grant.orchestrator {
                 return Err("kill_agent não encerra o próprio orquestrador".to_owned());
             }
-            let status = st.agents.get(&id).and_then(|a| a.status.clone());
-            (id, st.name_of(id), status)
+            st.consume_news(grant.orchestrator, &[id]);
+            let name = st.name_of(id);
+            let agent = st
+                .agents
+                .get_mut(&id)
+                .ok_or(format!("agente desconhecido: {name}"))?;
+            let status = agent.status.clone();
+            if !status.as_ref().is_some_and(AgentStatus::is_terminal) {
+                agent.kill_requested = true;
+            }
+            (id, name, status)
         };
         if let Some(status) = status.filter(AgentStatus::is_terminal) {
             return Ok(json!({

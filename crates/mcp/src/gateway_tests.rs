@@ -520,6 +520,9 @@ async fn send_input_types_then_presses_enter() {
         .await
         .unwrap();
     h.command_seen(|_| h.inputs(a).len() == 6).await;
+    let report: NewsReport =
+        serde_json::from_value(h.call(method::TAKE_NEWS, json!({})).await.unwrap()).unwrap();
+    assert!(report.news.is_empty(), "responder consome a novidade");
     let inputs = h.inputs(a);
     assert_eq!(
         inputs,
@@ -576,6 +579,12 @@ async fn kill_agent_sends_kill_but_not_to_self() {
         .await
         .unwrap();
     assert_eq!(again["killed"], false);
+    let report: NewsReport =
+        serde_json::from_value(h.call(method::TAKE_NEWS, json!({})).await.unwrap()).unwrap();
+    assert!(
+        report.news.is_empty(),
+        "o fim pedido pelo orquestrador não é novidade"
+    );
     let err = h
         .call(method::KILL_AGENT, json!({"agent": "orquestrador"}))
         .await

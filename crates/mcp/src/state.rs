@@ -46,6 +46,8 @@ pub struct Agent {
     pub changes: u64,
     /// Último `send_input` ainda sem reação (ver `INPUT_GRACE`).
     pub input_at: Option<Instant>,
+    /// O orquestrador pediu `kill_agent`: o fim não é novidade para ele.
+    pub kill_requested: bool,
 }
 
 impl Agent {
@@ -56,6 +58,7 @@ impl Agent {
             browser_port: None,
             changes: 0,
             input_at: None,
+            kill_requested: false,
         }
     }
 
@@ -218,7 +221,8 @@ impl State {
             return;
         };
         let name = agent.config.name.clone();
-        if is_newsworthy(status) {
+        let expected = agent.kill_requested && status.is_terminal();
+        if is_newsworthy(status) && !expected {
             if !prev.is_some_and(|p| p.same_state(status)) {
                 self.push_news(parent, id, name, NewsEvent::Status(status.clone()));
             }
@@ -751,6 +755,16 @@ pub(crate) mod tests {
                 ("c", "removed", None)
             ]
         );
+    }
+
+    #[test]
+    fn requested_kill_is_not_news() {
+        let mut w = World::new();
+        let a = w.child("a");
+        w.status(a, AgentStatus::Running);
+        w.st.agents.get_mut(&a).unwrap().kill_requested = true;
+        w.status(a, AgentStatus::Done { exit_code: None });
+        assert!(!w.st.has_news(w.orq));
     }
 
     #[test]
