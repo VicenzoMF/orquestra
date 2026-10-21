@@ -1,9 +1,22 @@
 //! Montagem do backend: bus, fila de comandos, assinaturas da UI e o `Hub`.
 //!
-//! Fase 2: `mock_services` é o único ponto que muda. Troque por uma função
-//! que monte `Services { runner: Runner, browser: Chromium, store:
-//! SqliteStore, notifier: DesktopNotifier, gateway: McpGateway }` com a mesma
-//! assinatura de `start` (ver `docs/ARCHITECTURE.md` §4.6).
+//! Fase 2: troque `start_mock` por `start` com um `make` que monte os
+//! serviços reais (ver `docs/ARCHITECTURE.md` §4.6):
+//!
+//! ```ignore
+//! let backend = backend::start(rt.handle(), &config, |bus, cmd| {
+//!     Ok(Services {
+//!         runner: Runner::new(bus.clone(), config.runner.clone()),
+//!         browser: Chromium::new(bus.clone(), config.browser.clone()),
+//!         store,
+//!         notifier: DesktopNotifier::new(),
+//!         gateway: McpGateway::start(cmd.clone(), bus.clone(), config.clone())?,
+//!     })
+//! })?;
+//! ```
+//!
+//! `make` roda dentro do runtime (pode dar `tokio::spawn`) e depois de a UI
+//! assinar os dois canais.
 
 use std::sync::Arc;
 
@@ -50,8 +63,8 @@ pub struct Backend {
 pub fn start<R, B, S, N, G>(
     runtime: &Handle,
     config: &AppConfig,
-    make: impl FnOnce(&EventBus, &CommandSender) -> Services<R, B, S, N, G>,
-) -> Backend
+    make: impl FnOnce(&EventBus, &CommandSender) -> anyhow::Result<Services<R, B, S, N, G>>,
+) -> anyhow::Result<Backend>
 where
     R: AgentRunner,
     B: BrowserManager,
@@ -63,24 +76,32 @@ where
     let (cmd, cmd_rx) = command_channel();
     let events = bus.subscribe();
     let frames = bus.subscribe_frames();
-    let services = make(&bus, &cmd);
+    let services = {
+        let _guard = runtime.enter();
+        make(&bus, &cmd)?
+    };
     let hub = Hub::new(services, bus.clone(), HubConfig::from_app(config));
     let hub = runtime.spawn(hub.run(cmd_rx));
-    Backend {
+    Ok(Backend {
         bus,
         cmd,
         events,
         frames,
         hub,
-    }
+    })
 }
 
 /// Backend do modo `--mock`: serviços falsos, diretor (faz o papel do MCP)
 /// e, se `seed`, as duas orquestrações de demonstração.
-pub fn start_mock(runtime: &Handle, config: &AppConfig, scale: f64, seed: bool) -> Backend {
+pub fn start_mock(
+    runtime: &Handle,
+    config: &AppConfig,
+    scale: f64,
+    seed: bool,
+) -> anyhow::Result<Backend> {
     let backend = start(runtime, config, |bus, cmd| {
-        mock_services(bus, cmd, config, scale)
-    });
+        Ok(mock_services(bus, cmd, config, scale))
+    })?;
     runtime.spawn(crate::mock::run_director(
         backend.bus.subscribe(),
         backend.cmd.clone(),
@@ -94,7 +115,7 @@ pub fn start_mock(runtime: &Handle, config: &AppConfig, scale: f64, seed: bool) 
             scale,
         ));
     }
-    backend
+    Ok(backend)
 }
 
 /// Sobe as tasks de entrada da UI (eventos e quadros) sobre `shared`.
@@ -140,7 +161,7 @@ mod tests {
             events,
             frames,
             hub,
-        } = start_mock(&Handle::current(), &config, 0.01, false);
+        } = start_mock(&Handle::current(), &config, 0.01, false).unwrap();
         let shared = Shared::new(config.orchestration.max_concurrent_workers, 500);
         let rt = Handle::current();
         spawn_ui_feeds(

@@ -462,7 +462,7 @@ mod tests {
             events,
             frames,
             hub,
-        } = backend::start_mock(runtime.handle(), &config, 0.02, true);
+        } = backend::start_mock(runtime.handle(), &config, 0.02, true).unwrap();
         let shared = Shared::new(8, 500);
         backend::spawn_ui_feeds(
             runtime.handle(),

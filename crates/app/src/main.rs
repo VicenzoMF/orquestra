@@ -61,7 +61,8 @@ fn run() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
 
-    // Fase 2: o store real (SQLite) entra aqui e no `start_mock` abaixo.
+    // Fase 2: `SqliteStore::open_default()?` aqui; a config vem dele, e o
+    // `start_mock` abaixo vira `backend::start` com os serviços reais.
     let config = NullStore.load_config()?;
     let Backend {
         bus: _bus,
@@ -69,7 +70,7 @@ fn run() -> anyhow::Result<()> {
         events,
         frames,
         hub,
-    } = backend::start_mock(runtime.handle(), &config, 1.0, true);
+    } = backend::start_mock(runtime.handle(), &config, 1.0, true)?;
 
     let shared = Shared::new(
         config.orchestration.max_concurrent_workers,
