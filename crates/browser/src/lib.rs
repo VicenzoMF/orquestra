@@ -3,5 +3,6 @@
 
 mod discovery;
 mod dispatch;
+mod process;
 
 pub use crate::discovery::{ENV_EXECUTABLE, find_executable};
