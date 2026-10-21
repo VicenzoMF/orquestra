@@ -11,14 +11,16 @@ Legenda: `[x]` feito · `[~]` em andamento · `[ ]` pendente
 - [x] `core` v2: sessões, papéis/`parent`, fila (limite global/sessão, aprovação),
       `OrchestratorGateway`, MCP specs, convenções; diff removido; 24 testes
 - [x] `docs/ARCHITECTURE.md` v2
-- [ ] Commit inicial em `main` (base dos worktrees da Fase 1)
+- [x] Commit inicial em `main` (base dos worktrees da Fase 1)
 
 ## Fase 1 — paralela
-- [ ] A · runner — PTY, I/O, status por OSC/heurística, worktrees, injeção de MCP/hooks
-- [ ] B · browser — Chromium por agente, CDP, screencast, input, teste com página local
-- [ ] C · app — canvas, painel lateral, terminal, navegador, diálogos; sobre o Hub com mocks
-- [ ] D · store — SQLite, histórico, log de saída, config TOML, notificações
-- [ ] E · mcp — gateway (socket + tokens), ferramentas, ponte stdio, hook `stop`
+Worktrees em `../orquestra-worktrees/<crate>`, branches `phase1/<crate>`.
+
+- [~] A · runner — PTY, I/O, status por OSC/heurística, worktrees, injeção de MCP/hooks
+- [~] B · browser — Chromium por agente, CDP, screencast, input, teste com página local
+- [~] C · app — canvas, painel lateral, terminal, navegador, diálogos; sobre o Hub com mocks
+- [~] D · store — SQLite, histórico, log de saída, config TOML, notificações
+- [~] E · mcp — gateway (socket + tokens), ferramentas, ponte stdio, hook `stop`
 
 ## Fase 2 — integração (sequencial)
 - [ ] Merge das 5 branches
