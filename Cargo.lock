@@ -2647,6 +2647,7 @@ dependencies = [
  "chromiumoxide",
  "futures",
  "orquestra-core",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
