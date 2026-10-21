@@ -1,0 +1,22 @@
+[package]
+name = "orquestra-core"
+description = "Contratos do orquestra: tipos, eventos, comandos, traits e o hub que roteia comandos."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
+bytes.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "macros", "time", "test-util"] }
+toml.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "orquestra-app"
+description = "UI egui: só consome eventos e envia comandos."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "orquestra"
+path = "src/main.rs"
+
+[dependencies]
+orquestra-core.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
+bytes.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+egui.workspace = true
+eframe.workspace = true
+alacritty_terminal.workspace = true
+image.workspace = true
+
+[lints]
+workspace = true

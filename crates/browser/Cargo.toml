@@ -1,0 +1,24 @@
+[package]
+name = "orquestra-browser"
+description = "Chromium por agente via CDP: lançamento, screencast, repasse de input."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+orquestra-core.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time", "process", "net", "fs"] }
+bytes.workspace = true
+futures.workspace = true
+tracing.workspace = true
+chromiumoxide.workspace = true
+base64.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

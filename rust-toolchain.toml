@@ -1,0 +1,5 @@
+[toolchain]
+# egui/eframe 0.36+ exigem Rust 1.95.
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
