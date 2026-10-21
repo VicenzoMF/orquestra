@@ -2647,10 +2647,12 @@ dependencies = [
  "chromiumoxide",
  "futures",
  "orquestra-core",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
