@@ -251,6 +251,25 @@ impl Session {
         answer
     }
 
+    /// Espera uma opção do menu: número, Enter (a primeira) ou Esc. `true`
+    /// = sim (qualquer opção menos a última).
+    async fn choose(&mut self, options: u8) -> bool {
+        self.agent.set_status(AgentStatus::WaitingForInput);
+        let answer = loop {
+            let Some(data) = self.input.recv().await else {
+                return std::future::pending().await;
+            };
+            match data.as_ref() {
+                b"\r" => break true,
+                b"\x1b" | b"\x03" => break false,
+                [d @ b'1'..=b'9'] if d - b'0' <= options => break d - b'0' < options,
+                _ => {}
+            }
+        };
+        self.agent.set_status(AgentStatus::Running);
+        answer
+    }
+
     async fn run(mut self, steps: Vec<Step>) {
         self.agent.set_status(AgentStatus::Running);
         for step in steps {
@@ -261,6 +280,18 @@ impl Session {
                 Step::Ask { prompt, on_no } => {
                     self.agent.emit(prompt);
                     if !self.ask().await {
+                        self.agent.emit(format!("{BOLD}●{RESET} {on_no}\r\n"));
+                    }
+                }
+                Step::Menu {
+                    text,
+                    options,
+                    on_no,
+                } => {
+                    self.agent.emit(text.clone());
+                    let yes = self.choose(options).await;
+                    self.agent.emit(script::erase(&text));
+                    if !yes {
                         self.agent.emit(format!("{BOLD}●{RESET} {on_no}\r\n"));
                     }
                 }
@@ -545,7 +576,7 @@ mod tests {
 
         status_until(&mut rx, id, |s| *s == AgentStatus::WaitingForInput).await;
         runner
-            .send_input(id, Bytes::from_static(b"s\r"))
+            .send_input(id, Bytes::from_static(b"1"))
             .await
             .unwrap();
         let done = status_until(&mut rx, id, AgentStatus::is_terminal).await;

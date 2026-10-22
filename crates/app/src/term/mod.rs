@@ -4,6 +4,7 @@
 
 pub mod keys;
 pub mod palette;
+pub mod preview;
 pub mod view;
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -17,6 +18,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode, viewport_to_point};
 use alacritty_terminal::vte::ansi::{Processor, Rgb};
 use orquestra_core::TermSize;
+pub use preview::{Choice, Preview};
 
 /// Dimensões no formato que o `Term` pede.
 #[derive(Clone, Copy, Debug)]
@@ -105,9 +107,9 @@ pub struct AgentTerm {
     scrollback: usize,
     next_seq: u64,
     awaiting_replay: bool,
-    /// Cresce a cada mudança de conteúdo (cache de render e do rabo).
+    /// Cresce a cada mudança de conteúdo (cache de render e da prévia).
     generation: u64,
-    tail_cache: Option<(u64, Vec<String>)>,
+    preview_cache: Option<(u64, Arc<Preview>)>,
 }
 
 impl AgentTerm {
@@ -122,7 +124,7 @@ impl AgentTerm {
             next_seq: 0,
             awaiting_replay: false,
             generation: 0,
-            tail_cache: None,
+            preview_cache: None,
         }
     }
 
@@ -338,40 +340,22 @@ impl AgentTerm {
             .to_owned()
     }
 
-    /// Últimas `n` linhas com conteúdo da tela, em texto puro. Pula linhas só
-    /// de moldura (caixas de TUI), que não dizem nada no card.
-    pub fn tail(&mut self, n: usize) -> Vec<String> {
-        if let Some((generation, lines)) = &self.tail_cache
+    /// Prévia para os cards: últimas linhas úteis e a pergunta de sim/não,
+    /// se houver (ver `preview`). Recalculada só quando a tela muda.
+    pub fn preview(&mut self) -> Arc<Preview> {
+        if let Some((generation, preview)) = &self.preview_cache
             && *generation == self.generation
         {
-            return last_n(lines, n);
+            return preview.clone();
         }
-        let mut lines = Vec::new();
-        for line in (0..self.term.screen_lines()).rev() {
-            let text = self.screen_line(line);
-            if is_meaningful(&text) {
-                lines.push(text.trim().to_owned());
-                if lines.len() == 8 {
-                    break;
-                }
-            }
-        }
-        lines.reverse();
-        let out = last_n(&lines, n);
-        self.tail_cache = Some((self.generation, lines));
-        out
+        let rows: Vec<String> = (0..self.term.screen_lines())
+            .map(|l| self.screen_line(l))
+            .collect();
+        let app_cursor = self.mode().contains(TermMode::APP_CURSOR);
+        let preview = Arc::new(preview::analyze(&rows, app_cursor));
+        self.preview_cache = Some((self.generation, preview.clone()));
+        preview
     }
-}
-
-fn last_n(lines: &[String], n: usize) -> Vec<String> {
-    lines[lines.len().saturating_sub(n)..].to_vec()
-}
-
-/// Linha com algo além de espaços e caracteres de moldura.
-fn is_meaningful(text: &str) -> bool {
-    text.chars().any(|c| {
-        !c.is_whitespace() && !matches!(c, '\u{2500}'..='\u{259f}' | '|' | '-' | '_' | '=')
-    })
 }
 
 #[cfg(test)]
@@ -472,16 +456,18 @@ mod tests {
     }
 
     #[test]
-    fn tail_skips_frame_lines() {
+    fn preview_follows_the_screen() {
         let mut t = term();
         t.on_output(
             0,
             b"primeira\r\nsegunda\r\n\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\r\n",
         );
-        assert_eq!(t.tail(1), ["segunda"]);
-        assert_eq!(t.tail(5), ["primeira", "segunda"]);
-        t.on_output(1, b"terceira");
-        assert_eq!(t.tail(1), ["terceira"]);
+        assert_eq!(t.preview().lines, ["primeira", "segunda"]);
+        assert!(t.preview().choice.is_none());
+        t.on_output(1, b"Continuar? (s/n) ");
+        let p = t.preview();
+        assert_eq!(p.lines.last().unwrap(), "Continuar? (s/n)");
+        assert_eq!(&p.choice.as_ref().unwrap().yes[..], b"s\r");
     }
 
     #[test]

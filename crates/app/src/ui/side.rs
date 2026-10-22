@@ -10,7 +10,6 @@ use super::canvas::CanvasState;
 use super::dialogs::{Confirm, Dialogs};
 use super::widgets::{self, kind_label};
 use super::{Ctx, Resources, SideTab, UiState};
-use crate::actions;
 use crate::feed::lock;
 use crate::model::{AgentView, AttentionKind, BrowserState, StatusKind, plural, status_label};
 use crate::term::view;
@@ -253,12 +252,19 @@ fn overview(
                             .color(theme::TEXT_DIM),
                     );
                 });
+                let preview = cx.shared.preview(agent.id);
                 let detail = match item.kind {
-                    AttentionKind::Input => cx
-                        .shared
-                        .term(agent.id)
-                        .and_then(|t| lock(&t).tail(1).pop())
-                        .unwrap_or_else(|| "Aguardando sua resposta".to_owned()),
+                    // Numa pergunta, as linhas de cima dizem o que está em jogo
+                    // (o comando, o arquivo); senão basta a última.
+                    AttentionKind::Input => {
+                        let n = if preview.choice.is_some() { 3 } else { 1 };
+                        let lines = &preview.lines[preview.lines.len().saturating_sub(n)..];
+                        if lines.is_empty() {
+                            "Aguardando sua resposta".to_owned()
+                        } else {
+                            lines.join("\n")
+                        }
+                    }
                     AttentionKind::Approval => format!(
                         "Quer criar este agente: {}",
                         agent.config.initial_prompt.as_deref().unwrap_or("")
@@ -276,21 +282,23 @@ fn overview(
                 ui.label(RichText::new(detail).monospace().size(11.5).color(color));
                 ui.horizontal(|ui| match item.kind {
                     AttentionKind::Input => {
-                        let (yes, no) = actions::quick_replies(agent.config.kind);
-                        if ui.add(widgets::tinted_button("Sim", theme::DONE)).clicked() {
-                            cx.send(Command::SendInput {
-                                id: agent.id,
-                                data: yes,
-                            });
-                        }
-                        if ui
-                            .add(widgets::tinted_button("Não", theme::FAILED))
-                            .clicked()
-                        {
-                            cx.send(Command::SendInput {
-                                id: agent.id,
-                                data: no,
-                            });
+                        // Sim/Não só quando a tela pergunta; senão, o terminal.
+                        if let Some(choice) = &preview.choice {
+                            if ui.add(widgets::tinted_button("Sim", theme::DONE)).clicked() {
+                                cx.send(Command::SendInput {
+                                    id: agent.id,
+                                    data: choice.yes.clone(),
+                                });
+                            }
+                            if ui
+                                .add(widgets::tinted_button("Não", theme::FAILED))
+                                .clicked()
+                            {
+                                cx.send(Command::SendInput {
+                                    id: agent.id,
+                                    data: choice.no.clone(),
+                                });
+                            }
                         }
                         if ui.button("Abrir terminal").clicked() {
                             st.select(agent.id);

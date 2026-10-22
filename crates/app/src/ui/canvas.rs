@@ -14,9 +14,9 @@ use super::widgets::{self, kind_label, paint_elided};
 use super::{Ctx, Resources, UiState};
 use crate::actions;
 use crate::browser::fit_rect;
-use crate::feed::lock;
 use crate::layout::{self, ANCHOR_Y, CanvasLayout, Edge, NodeSpec, SessionLayout, SessionSpec};
 use crate::model::{AgentView, Model, SessionView, StatusKind, plural, status_label};
+use crate::term::{Choice, Preview};
 use crate::theme;
 
 pub const ORQ_W: f32 = 330.0;
@@ -530,8 +530,8 @@ fn card_frame(painter: &egui::Painter, rect: Rect, agent: &AgentView, selected: 
     }
 }
 
-/// Linha de contexto do card: última linha do terminal ou o motivo da espera.
-fn context_line(cx: &Ctx, agent: &AgentView) -> (String, Color32) {
+/// Linha de contexto do card: última linha útil do terminal ou o motivo da espera.
+fn context_line(agent: &AgentView, preview: &Preview) -> (String, Color32) {
     match &agent.status {
         AgentStatus::Queued {
             reason: QueueReason::Capacity,
@@ -550,11 +550,11 @@ fn context_line(cx: &Ctx, agent: &AgentView) -> (String, Color32) {
             theme::APPROVAL,
         ),
         AgentStatus::Failed { reason } => {
-            let last = term_tail(cx, agent, 1).pop();
+            let last = preview.lines.last().cloned();
             (last.unwrap_or_else(|| reason.clone()), theme::FAILED)
         }
-        _ => match term_tail(cx, agent, 1).pop() {
-            Some(line) => (line, Color32::from_rgb(0xb4, 0xba, 0xc4)),
+        _ => match preview.lines.last() {
+            Some(line) => (line.clone(), Color32::from_rgb(0xb4, 0xba, 0xc4)),
             None => (
                 agent
                     .config
@@ -567,11 +567,12 @@ fn context_line(cx: &Ctx, agent: &AgentView) -> (String, Color32) {
     }
 }
 
-fn term_tail(cx: &Ctx, agent: &AgentView, n: usize) -> Vec<String> {
-    cx.shared
-        .term(agent.id)
-        .map(|t| lock(&t).tail(n))
-        .unwrap_or_default()
+/// Pergunta de sim/não na tela de um agente que espera o humano.
+fn pending_choice<'a>(agent: &AgentView, preview: &'a Preview) -> Option<&'a Choice> {
+    preview
+        .choice
+        .as_ref()
+        .filter(|_| agent.kind() == StatusKind::Waiting)
 }
 
 fn card_header(painter: &egui::Painter, rect: Rect, agent: &AgentView, title: &str, star: bool) {
@@ -655,7 +656,8 @@ fn worker_card(
         painter.galley(badge.min + vec2(6.0, 2.0), galley, theme::ACCENT);
     }
 
-    let (line, color) = context_line(cx, agent);
+    let preview = cx.shared.preview(agent.id);
+    let (line, color) = context_line(agent, &preview);
     paint_elided(
         &painter,
         pos2(x, rect.top() + 68.0),
@@ -674,8 +676,8 @@ fn worker_card(
         );
         painter.rect_filled(tail_rect, CornerRadius::same(6), theme::TERM_BG);
         // A última linha já aparece acima; aqui vêm as anteriores.
-        let mut lines = term_tail(cx, agent, 5);
-        lines.pop();
+        let before = &preview.lines[..preview.lines.len().saturating_sub(1)];
+        let lines = &before[before.len().saturating_sub(4)..];
         for (i, l) in lines.iter().enumerate() {
             paint_elided(
                 &painter,
@@ -697,7 +699,8 @@ fn worker_card(
             y += THUMB_H;
         }
         if agent.kind() == StatusKind::Waiting {
-            reply_row(ui, cx, st, agent, pos2(rect.left() + 12.0, y));
+            let choice = pending_choice(agent, &preview);
+            reply_row(ui, cx, st, agent, choice, pos2(rect.left() + 12.0, y));
             y += ROW_H;
         }
     }
@@ -760,38 +763,55 @@ fn thumbnail(
     }
 }
 
-fn reply_row(ui: &mut Ui, cx: &Ctx, st: &mut UiState, agent: &AgentView, at: Pos2) {
-    let (yes, no) = actions::quick_replies(agent.config.kind);
-    let size = vec2(64.0, 24.0);
-    let r1 = Rect::from_min_size(at, size);
-    let r2 = r1.translate(vec2(72.0, 0.0));
-    let r3 = Rect::from_min_size(r2.right_top() + vec2(8.0, 0.0), vec2(110.0, 24.0));
-    if ui
-        .put(r1, widgets::tinted_button("Sim", theme::DONE))
-        .clicked()
-    {
-        cx.send(Command::SendInput {
-            id: agent.id,
-            data: yes,
-        });
+/// Sim/Não só quando a tela pergunta (pedido de permissão, confirmação);
+/// um agente que só terminou o turno ganha apenas o atalho para o terminal.
+fn reply_row(
+    ui: &mut Ui,
+    cx: &Ctx,
+    st: &mut UiState,
+    agent: &AgentView,
+    choice: Option<&Choice>,
+    at: Pos2,
+) {
+    let mut x = at.x;
+    if let Some(choice) = choice {
+        choice_buttons(ui, cx, agent, choice, at);
+        x += 144.0;
     }
-    if ui
-        .put(r2, widgets::tinted_button("Não", theme::FAILED))
-        .clicked()
-    {
-        cx.send(Command::SendInput {
-            id: agent.id,
-            data: no,
-        });
-    }
+    let open = Rect::from_min_size(pos2(x, at.y), vec2(110.0, 24.0));
     if ui
         .put(
-            r3,
+            open,
             egui::Button::new(RichText::new("Abrir terminal").size(12.5)),
         )
         .clicked()
     {
         st.select(agent.id);
+    }
+}
+
+/// Botões Sim (x..x+64) e Não (x+72..x+136) que mandam as teclas da pergunta.
+fn choice_buttons(ui: &mut Ui, cx: &Ctx, agent: &AgentView, choice: &Choice, at: Pos2) {
+    let size = vec2(64.0, 24.0);
+    let yes = Rect::from_min_size(at, size);
+    let no = yes.translate(vec2(72.0, 0.0));
+    if ui
+        .put(yes, widgets::tinted_button("Sim", theme::DONE))
+        .clicked()
+    {
+        cx.send(Command::SendInput {
+            id: agent.id,
+            data: choice.yes.clone(),
+        });
+    }
+    if ui
+        .put(no, widgets::tinted_button("Não", theme::FAILED))
+        .clicked()
+    {
+        cx.send(Command::SendInput {
+            id: agent.id,
+            data: choice.no.clone(),
+        });
     }
 }
 
@@ -884,7 +904,8 @@ fn orchestrator_card(
         painter.rect_filled(fill, CornerRadius::same(3), theme::DONE);
     }
 
-    let (line, color) = context_line(cx, agent);
+    let preview = cx.shared.preview(agent.id);
+    let (line, color) = context_line(agent, &preview);
     paint_elided(
         &painter,
         pos2(x, rect.top() + 146.0),
@@ -894,6 +915,12 @@ fn orchestrator_card(
         color,
         w,
     );
+
+    // Pergunta na tela (permissão, confiança na pasta): Sim/Não no lugar do campo.
+    if let Some(choice) = pending_choice(agent, &preview) {
+        reply_row(ui, cx, st, agent, Some(choice), pos2(x, rect.top() + 166.0));
+        return;
+    }
 
     // Campo de conversa: texto + Enter vai para o PTY do orquestrador.
     let field = Rect::from_min_size(pos2(x, rect.top() + 164.0), vec2(w - 38.0, 28.0));

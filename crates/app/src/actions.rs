@@ -78,18 +78,6 @@ pub fn message(text: &str) -> Bytes {
     Bytes::from(format!("{}\r", text.trim_end()))
 }
 
-/// Bytes de "Sim" e "Não" para um pedido de permissão, por tipo de CLI.
-/// Claude Code: Enter confirma a opção destacada, Esc recusa. Codex: `y`/Esc.
-pub fn quick_replies(kind: AgentKind) -> (Bytes, Bytes) {
-    match kind {
-        AgentKind::ClaudeCode => (Bytes::from_static(b"\r"), Bytes::from_static(b"\x1b")),
-        AgentKind::Codex => (Bytes::from_static(b"y"), Bytes::from_static(b"\x1b")),
-        AgentKind::Shell | AgentKind::Custom => {
-            (Bytes::from_static(b"s\r"), Bytes::from_static(b"n\r"))
-        }
-    }
-}
-
 /// Nome padrão de uma sessão: "<pasta do repo> · <objetivo curto>".
 pub fn session_name(repo: &std::path::Path, goal: &str) -> String {
     let base = repo
@@ -180,7 +168,6 @@ mod tests {
     #[test]
     fn helpers() {
         assert_eq!(&message("oi  ")[..], b"oi\r");
-        assert_eq!(&quick_replies(AgentKind::ClaudeCode).1[..], b"\x1b");
         assert_eq!(
             session_name("/home/x/loja".as_ref(), "Login com e-mail"),
             "loja · login com e-mail"

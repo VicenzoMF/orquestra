@@ -26,6 +26,14 @@ pub enum Step {
     /// Pergunta e espera uma linha: `WaitingForInput` até o Enter. Se a
     /// resposta for "não", escreve `on_no`.
     Ask { prompt: String, on_no: String },
+    /// Menu de permissão no estilo do Claude Code, com `options` opções (a
+    /// última é o "não"): espera o número ou Esc e some da tela depois.
+    /// Se a resposta for "não", escreve `on_no`.
+    Menu {
+        text: String,
+        options: u8,
+        on_no: String,
+    },
     /// Termina o processo com este código.
     Exit(i32),
     /// Fica `Running` sem saída (como um orquestrador bloqueado em
@@ -50,6 +58,33 @@ fn tool(name: &str, args: &str, result: &str) -> Vec<Step> {
         line(format!("  {GRAY}└{RESET} {result}")),
         Sleep(500),
     ]
+}
+
+/// Pedido de permissão do Claude Code para rodar um comando.
+fn permission(command: &str, again: &str, on_no: &str) -> Step {
+    let rule = "─".repeat(60);
+    let options = [
+        format!("{CLAUDE}❯{RESET} 1. Yes"),
+        format!("  2. Yes, and don't ask again for {again} commands"),
+        "  3. No, and tell Claude what to do differently (esc)".to_owned(),
+    ];
+    let mut text = format!(
+        "{GRAY}{rule}{RESET}\r\n {BOLD}Bash command{RESET}\r\n\r\n   {command}\r\n\r\n Do you want to proceed?\r\n"
+    );
+    for option in &options {
+        text.push_str(&format!(" {option}\r\n"));
+    }
+    text.push_str(&format!("\r\n {GRAY}Esc to cancel{RESET}\r\n"));
+    Menu {
+        text,
+        options: options.len() as u8,
+        on_no: on_no.to_owned(),
+    }
+}
+
+/// Apaga um menu já escrito: sobe as linhas que ele ocupou e limpa dali para baixo.
+pub fn erase(text: &str) -> String {
+    format!("\x1b[{}F\x1b[J", text.matches("\r\n").count())
 }
 
 fn say(text: &str) -> Step {
@@ -227,12 +262,11 @@ fn worker(kind: AgentKind, name: &str) -> Vec<Step> {
             )));
             s.push(Spin("Escrevendo testes", 1500));
             s.push(line(""));
-            s.push(Ask {
-                prompt: format!(
-                    "{YELLOW}●{RESET} Bash(npm install zod @hookform/resolvers)\r\nPermitir npm install? (s/n) "
-                ),
-                on_no: "Ok, sigo sem dependências novas.".to_owned(),
-            });
+            s.push(permission(
+                "npm install zod @hookform/resolvers",
+                "npm install",
+                "Ok, sigo sem dependências novas.",
+            ));
             s.extend(tool(
                 "Bash",
                 "npm install zod @hookform/resolvers",
@@ -378,6 +412,8 @@ fn generic(name: &str, codex_kind: bool) -> Vec<Step> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::term::AgentTerm;
+    use orquestra_core::TermSize;
 
     #[test]
     fn session_name_comes_from_prompt() {
@@ -411,5 +447,27 @@ mod tests {
             let steps = worker(AgentKind::ClaudeCode, name);
             assert!(matches!(steps.last(), Some(Exit(_))), "{name}");
         }
+    }
+
+    #[test]
+    fn permission_menu_reads_as_a_choice_and_is_erased() {
+        let Menu { text, options, .. } = permission("npm test", "npm test", "ok") else {
+            panic!("permission devolve um Menu");
+        };
+        assert_eq!(options, 3);
+        let size = TermSize {
+            cols: 100,
+            rows: 30,
+            cell_width: 8,
+            cell_height: 16,
+        };
+        let mut t = AgentTerm::new(size, 100);
+        t.on_output(0, format!("● Pensando\r\n{text}").as_bytes());
+        let choice = t.preview().choice.clone().expect("menu de sim/não");
+        assert_eq!(&choice.yes[..], b"1");
+        assert_eq!(&choice.no[..], b"\x1b");
+        t.on_output(1, erase(&text).as_bytes());
+        assert_eq!(t.preview().choice, None);
+        assert_eq!(t.preview().lines, ["● Pensando"]);
     }
 }

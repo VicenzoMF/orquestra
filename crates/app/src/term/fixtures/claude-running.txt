@@ -1,0 +1,21 @@
+ ▐▛███▛█   Claude Code v2.1.296
+▝▜██████▀  Haiku 5.5 with xhigh effort · Claude Max
+ ▝▝   ▝▝   /…/projetos/loja
+
+
+❯ Rode exatamente este comando bash e nada mais: sleep 6 && date > lento.txt
+
+  Bash(sleep 6 && date > lento.txt)
+  ⎿  Running…
+
+✻ Whisking… (3s · ↓ 300 tokens)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker · restart with CLAUDE_C…
+  [Haiku 5.5] │ repo git:(main*) │ Cost $0.0026
+  Context ░░░░░░ 4% │ Usage ░░░░░░ 2% (resets in 51m) | Weekly █░░░░░ 12% (resets in 5d 15h)
+  2 rules | 3 MCPs
+  ⏸ manual mode on
+                                                                                 ◉ xhigh · /effort

@@ -14,7 +14,7 @@ use tracing::warn;
 
 use crate::browser::FrameStore;
 use crate::model::Model;
-use crate::term::AgentTerm;
+use crate::term::{AgentTerm, Preview};
 
 pub type SharedTerm = Arc<Mutex<AgentTerm>>;
 
@@ -51,6 +51,13 @@ impl Shared {
 
     pub fn term(&self, id: AgentId) -> Option<SharedTerm> {
         lock(&self.terms).get(&id).cloned()
+    }
+
+    /// Prévia do terminal do agente (vazia enquanto não há saída).
+    pub fn preview(&self, id: AgentId) -> Arc<Preview> {
+        self.term(id)
+            .map(|t| lock(&t).preview())
+            .unwrap_or_default()
     }
 
     fn term_or_create(&self, id: AgentId, size: TermSize) -> SharedTerm {
