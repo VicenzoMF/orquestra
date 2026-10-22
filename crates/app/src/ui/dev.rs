@@ -6,6 +6,8 @@
 //! - `ORQUESTRA_DEMO_SELECT=nome`: seleciona o agente com esse nome;
 //! - `ORQUESTRA_DEMO_TAB=navegador`: abre a aba do navegador;
 //! - `ORQUESTRA_DEMO_FOCUS=prefixo`: foca a sessão cujo nome começa assim;
+//! - `ORQUESTRA_DEMO_MOVE=prefixo:x,y`: põe a moldura dessa sessão em (x, y)
+//!   e reenquadra;
 //! - `ORQUESTRA_DEMO_DIALOG=nova|nova-mais|avulso|config`: abre o rascunho
 //!   de orquestração no canvas (`nova-mais`: com todas as opções) ou um
 //!   diálogo.
@@ -15,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use egui::ViewportCommand;
+use egui::{ViewportCommand, pos2};
 
 use super::canvas::CanvasState;
 use super::dialogs::Dialogs;
@@ -28,6 +30,8 @@ pub struct DevHooks {
     select: Option<String>,
     browser_tab: bool,
     focus: Option<String>,
+    /// Prefixo do nome da sessão e onde pôr a moldura.
+    place: Option<(String, egui::Pos2)>,
     dialog: Option<String>,
     prepared: bool,
     requested: bool,
@@ -48,6 +52,14 @@ impl DevHooks {
             select: var("ORQUESTRA_DEMO_SELECT"),
             browser_tab: var("ORQUESTRA_DEMO_TAB").is_some_and(|t| t.starts_with("nav")),
             focus: var("ORQUESTRA_DEMO_FOCUS"),
+            place: var("ORQUESTRA_DEMO_MOVE").and_then(|v| {
+                let (prefix, at) = v.split_once(':')?;
+                let (x, y) = at.split_once(',')?;
+                Some((
+                    prefix.to_owned(),
+                    pos2(x.trim().parse().ok()?, y.trim().parse().ok()?),
+                ))
+            }),
             dialog: var("ORQUESTRA_DEMO_DIALOG"),
             prepared: false,
             requested: false,
@@ -90,6 +102,15 @@ impl DevHooks {
                 Some("avulso") => dialogs.open_solo(cx, st),
                 Some("config") => dialogs.open_settings(cx.config),
                 _ => {}
+            }
+            if let Some((prefix, at)) = &self.place
+                && let Some(s) = model
+                    .sessions()
+                    .into_iter()
+                    .find(|s| s.config.name.starts_with(prefix.as_str()))
+            {
+                canvas.set_position(s.id, *at);
+                canvas.request_fit();
             }
             if let Some(prefix) = &self.focus
                 && let Some(s) = model
