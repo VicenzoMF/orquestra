@@ -5,9 +5,11 @@ App desktop em Rust, leve, para rodar e acompanhar vários agentes de código
 **orquestrações**. Em cada uma, um agente **orquestrador** recebe um objetivo,
 cria os agentes que executam as tarefas e os acompanha. Tudo aparece num
 **canvas**: cada orquestração é um grupo, o orquestrador está ligado por setas
-aos agentes que criou. Cada agente roda isolado num git worktree e pode ter
-um Chromium próprio, que ele controla via CDP/MCP e que a UI mostra e deixa
-interagir.
+aos agentes que criou. Também dá para abrir um agente sozinho numa pasta,
+numa sessão só dele. Cada agente roda num git worktree próprio (numa pasta
+git) ou direto numa pasta qualquer, e pode ter um Chromium próprio, que ele
+controla via CDP/MCP e que a UI mostra e deixa interagir. O que estiver
+aberto volta quando o app abre de novo, com cada conversa retomada.
 
 Layout aprovado (canvas interativo, 4 telas):
 https://claude.ai/artifact/5cuERHSaTLUxzXJ6UPsmoa
@@ -54,13 +56,13 @@ de `core`; `app` depende de todos. O binário `orq` (com o apelido
 - `orq [pasta] [-g objetivo]`: a UI, como o `code .`.
   - Há uma instância por usuário. Ela segura `ui.lock` e atende `ui.sock` em
     `$XDG_RUNTIME_DIR/orquestra/`, um pedido JSON por linha (`instance.rs`).
-    Outro `orq` entrega o pedido a ela e sai. Isso também evita que uma
-    segunda instância feche as sessões da primeira como interrompidas.
+    Outro `orq` entrega o pedido a ela e sai. Isso também evita duas
+    instâncias reabrindo e controlando as mesmas sessões.
   - Sem instância, o `orq` sobe a UI noutro processo, em sessão própria e
     com o log em `<dados>/orquestra.log`, e devolve o terminal.
-  - A pasta vira a raiz do repositório git. Sem objetivo, abre o rascunho
-    de orquestração no canvas já com a pasta; com objetivo, já cria a
-    orquestração.
+  - Qualquer pasta serve; dentro de um repositório git, vale a raiz dele.
+    Sem objetivo, abre o rascunho no canvas já com a pasta; com objetivo, já
+    cria a orquestração.
   - Pedido vindo de outro terminal traz a janela para a frente. No Wayland o
     compositor não deixa: a janela pede atenção.
 - `orq mcp`: a ponte stdio do MCP, que o CLI do orquestrador sobe;
@@ -111,7 +113,11 @@ pub struct SessionConfig {            // uma orquestração = um grupo no canvas
 
 pub enum AgentKind { ClaudeCode, Codex, Shell, Custom }
 pub enum AgentRole { Orchestrator, Worker }
-pub enum Workspace { Worktree { repo, base, branch }, Directory { path } }
+pub enum Workspace {
+    Worktree { repo, base, branch },  // git worktree e branch novos
+    Directory { path },               // direto numa pasta qualquer
+    Restore { path, worktree },       // reabertura: onde estava, retomando a conversa
+}
 pub struct AgentConfig {
     name, kind, program, args, env,
     session: SessionId, role: AgentRole,
@@ -175,6 +181,7 @@ pub struct Notification { agent, kind: NeedsInput|NeedsApproval|Finished|Failed,
 | `CreateSession { id, config }` | → `SessionCreated` |
 | `CloseSession { id, cleanup }` | remove todos os agentes da sessão → `SessionClosed` + `Removed`… |
 | `Spawn { id, config }` | `Created` → `Queued{..}` ou `Starting` → [navegador] → [grant] → `runner.spawn` → `Spawned` |
+| `Restore { record }` | reabertura: vivo → `Spawn` com `Workspace::Restore` (sem nova aprovação); na fila → `Spawn` normal; terminado → `Created` + `Spawned` + status + `Replay` da saída gravada, sem processo |
 | `ApproveSpawn { id }` / `RejectSpawn { id }` | libera ou descarta (→ `Removed`) um `Queued{Approval}` |
 | `SendInput` / `Resize` / `Kill` / `Remove { cleanup }` / `RequestReplay` | por agente; `Kill` na fila → `Done`; outros na fila → `Error` |
 | `OpenBrowser` / `CloseBrowser` / `SetBrowserVisible` / `BrowserInput` / `BrowserNavigate` / `BrowserResize` | repasse ao browser |
@@ -248,6 +255,10 @@ O modo `--mock` é a mesma montagem com serviços falsos do agente C.
 
 ## 5. Sequências
 
+**Agente sozinho.** No modo Agente do rascunho, a UI manda `CreateSession`
+(uma sessão só dele, sem orquestrador) e `Spawn` do agente, direto na pasta
+ou, se pedido numa pasta git, num worktree.
+
 **Nova orquestração.** A pessoa escreve o objetivo no rascunho do canvas
 (§6, app) e aperta Enter ou "Iniciar". A UI manda `CreateSession`. Depois
 manda `Spawn` do
@@ -261,7 +272,9 @@ runner registra o MCP na CLI e sobe o processo.
 socket e pelo gateway. O gateway valida contra a sessão (tipos, navegador,
 nome único), monta o `AgentConfig`:
 - `role: Worker`, `parent = orquestrador`;
-- `Workspace::Worktree { repo da sessão }`;
+- `Workspace::Worktree` (`workspace: "worktree"`, o padrão numa pasta git) ou
+  `Workspace::Directory` (`workspace: "pasta"`, o padrão fora de um
+  repositório); `dir` troca a pasta da sessão por qualquer outra;
 - `initial_prompt = tarefa`.
 
 Então manda `Command::Spawn`. O hub publica `Created` (a UI desenha o nó e a
@@ -300,8 +313,25 @@ os agentes, visíveis ou não, então sempre responde.
   credencial e publica `Removed`.
 - `CloseSession` faz `Remove` em todos os agentes da sessão.
 
-**Shutdown.** Lanes têm 3 s para esvaziar. Depois `runner.shutdown` e
-`browser.shutdown`, o hub publica `Shutdown` e o recorder dá `flush`.
+**Shutdown.** Lanes têm 3 s para esvaziar. Então o hub publica `Shutdown` e
+espera o recorder dar `flush`; só depois vêm `runner.shutdown` e
+`browser.shutdown`. Assim o banco guarda cada agente como estava, sem
+`closed_at` nas sessões: fechar o app e cair dão no mesmo.
+
+**Reabertura.** Na abertura, `SqliteStore::open_sessions` devolve as sessões
+sem `closed_at` e os agentes não removidos, com o último status. O app manda
+`CreateSession` (mesmo id) e um `Restore` por agente, em ordem de criação.
+- O Claude Code nasce com `--session-id <id do agente>`, e o `Restore` o sobe
+  com `--resume <id>`: a conversa volta inteira. O Codex volta com `codex
+  resume --last` na pasta do agente (com dois Codex na mesma pasta, pode
+  trocar).
+- O orquestrador ganha credencial nova no spawn; o gateway refaz o estado
+  pelos eventos.
+- A primeira espera de um agente reaberto (nos primeiros 30 s) e os
+  terminados que voltam não viram notificação.
+- O runner tira do ambiente herdado a identidade da sessão do Claude Code que
+  abriu o `orq` (`CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`...):
+  herdada, ela fazia o agente não gravar a conversa.
 
 ## 6. Decisões por crate (guia da Fase 1)
 
@@ -409,9 +439,10 @@ os agentes, visíveis ou não, então sempre responde.
       setas a partir da destacada + Enter (é o caso do aviso de confiança na
       pasta);
     - pergunta de uma linha terminada em `(s/n)` ou `[Y/n]`.
-  - Cada moldura fica onde a pessoa a pôs. As posições ficam só no app
-    (`CanvasState`): as sessões não sobrevivem a um reinício, então nada vai
-    para o store. A posição some quando a sessão sai do modelo.
+  - Cada moldura fica onde a pessoa a pôs. As posições são estado da UI,
+    fora do banco: `<dados>/canvas.json` (`places.rs`), gravado quando muda
+    (não no meio de um arrasto) e lido na abertura, junto com as sessões
+    reabertas. A posição some quando a sessão sai do modelo.
     - "Iniciar" põe o canto da moldura onde estava o rascunho. Sessão sem
       posição (`orq <pasta> -g`, mocks) ganha uma na primeira vez que
       aparece: x = 0, logo abaixo da moldura mais baixa. Daí em diante fica
@@ -425,8 +456,10 @@ os agentes, visíveis ou não, então sempre responde.
     vertical) desce só na exibição, sem mudar a posição guardada, e volta
     quando a de cima encolhe.
   - Botão direito no fundo (também dentro de uma moldura, fora dos cards)
-    abre um menu; por enquanto, só "Iniciar novo agente orquestrador".
-  - **Rascunho de orquestração** (`ui/draft.rs`): uma janela no estilo dos
+    abre um menu: "Iniciar novo agente orquestrador" e "Iniciar novo agente".
+  - **Rascunho** (`ui/draft.rs`), de orquestração ou de agente (o modo
+    troca no topo da janela). Agente: tarefa opcional, tipo (qualquer
+    preset), pasta, worktree (só numa pasta git) e navegador. Uma janela no estilo dos
     cards, desenhada dentro da `Scene`, então acompanha pan e zoom. Abre no
     ponto do botão direito ou, por "+ Nova orquestração", Ctrl+Shift+N e
     `orq <pasta>`, no centro da área visível. Há um por vez: abrir de novo
@@ -444,14 +477,16 @@ os agentes, visíveis ou não, então sempre responde.
       orquestrador e põe a pasta nos recentes. A vista não se mexe e o
       ajuste automático segue desligado: a orquestração aparece onde a janela
       estava.
-- **Topo.** Pills de sessão (Todas / cada sessão, com resumo) e
-  "+ Nova orquestração" (abre o rascunho no canvas).
+- **Topo.** Pills de sessão (Todas / cada sessão, com resumo), "+ Novo
+  agente" e "+ Nova orquestração" (abrem o rascunho no canvas).
+- **"+ Agente na sessão"** (barra do canvas): mais um agente numa sessão
+  aberta, direto na pasta dela ou num worktree (pasta git).
 - **Painéis flutuantes** (`ui/overlay`), fixos na tela sobre o canvas; o
   enquadramento automático deixa livres as faixas de cima e de baixo (e não
   aproxima além de 100%; o zoom manual vai até 150%):
-  - **Orquestrações** (canto de cima à esquerda): um botão que abre a lista,
-    uma orquestração de cada vez (cascata), com focar, orquestrador e
-    encerrar. Esc ou clique no canvas fecha;
+  - **Sessões** (canto de cima à esquerda): um botão que abre a lista, uma
+    sessão de cada vez (cascata), com focar, orquestrador e encerrar. Esc ou
+    clique no canvas fecha;
   - **Precisa de você** (canto de cima à direita, recolhível; só aparece com
     algo pendente): input, aprovação e falhas de todas as sessões;
   - **Recursos** (canto de baixo à direita, uma linha): vagas, fila,
@@ -477,9 +512,9 @@ Referência visual: o canvas do link no topo do documento. Esboço da tela
 principal:
 
 ```
-┌ orquestra  [Todas][loja · 1 aguardando][blog · 1 falhou]  [+ Nova orquestração]      [cfg] ┐
+┌ orquestra  [Todas][loja · 1 aguardando][blog · 1 falhou] [+ Novo agente][+ Nova orquestração] [cfg] ┐
 ├ Visão geral  [- 70% +] [Ajustar]                         ● rodando ● aguardando ✓ ✕ ◌ ┤
-│ (≡ Orquestrações 2 ∨)                                    ┌ ● Precisa de você 2    ∧ ┐ │
+│ (≡ Sessões 2 ∨)                                          ┌ ● Precisa de você 2    ∧ ┐ │
 │      ┌ loja · login + produtos ───────────────────────────┐│ ● login-ui  loja         │ │
 │      │ ┌ orquestrador ──────┐     ┌ ● login-ui aguardando ┐││  Permitir npm install?  │ │
 │      │ │ Claude Code ● rod. │──┬─▶│   Permitir npm…       │││  [Sim] [Não] [Terminal] │ │
@@ -492,7 +527,7 @@ principal:
 │      └────────────────────────────────────────────────────┘                             │
 │                                              (vagas ▮▮▮▮▯▯▯▯ 4/8 · 1 navegador · 52 MB) │
 ├─────────────────────────────────────────────────────────────────────────────────────────┤
-│ 2 orquestrações · 7 agentes · 1 aguardando você · 1 falhou | ● hub ok                  │
+│ 2 sessões · 7 agentes · 1 aguardando você · 1 falhou | ● hub ok                        │
 └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 

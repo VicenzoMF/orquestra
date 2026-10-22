@@ -53,7 +53,18 @@ Worktrees em `../orquestra-worktrees/<crate>`, branches `phase1/<crate>`.
       "Orquestrações" (botão com lista em cascata) e "Recursos" (uma linha)
       flutuam fixos sobre o canvas
 
+- [x] Qualquer pasta: o `orq` abre pasta sem git, e cada agente trabalha num
+      worktree (pasta git) ou direto numa pasta, escolhido por spawn
+      (`workspace`, `dir`); o prompt antigo do orquestrador é migrado
+- [x] Agente sozinho numa pasta, numa sessão só dele ("+ Novo agente", modo
+      Agente do rascunho); "Orquestrações" vira "Sessões"
+- [x] O que estava aberto volta ao abrir o app (fechado ou PC desligado): a
+      conversa do Claude Code é retomada pelo id do agente (testado com o
+      Claude real); Codex por `resume --last`; posições do canvas em
+      `canvas.json`
+
 ## Próximos passos sugeridos
+- [ ] Testar a reabertura com o Codex real
 - [ ] Evento `Resized` no core para o gateway acompanhar o tamanho do terminal
 - [ ] Gateway receber a config salva (presets) sem reiniciar
 - [ ] Testar com Codex real; tela de histórico (`LoadHistory`)
