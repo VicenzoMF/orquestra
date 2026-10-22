@@ -240,6 +240,7 @@ fn specs(model: &Model, detailed: impl Fn(SessionId) -> bool) -> Vec<SessionSpec
             let d = detailed(s.id);
             SessionSpec {
                 id: s.id,
+                origin: None,
                 nodes: model
                     .agents_of(s.id)
                     .into_iter()

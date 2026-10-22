@@ -1,6 +1,9 @@
-//! Layout automático do canvas, em árvore. Função pura: recebe os nós com o
-//! tamanho de cada card e devolve molduras, retângulos e arestas ortogonais
-//! em coordenadas do canvas.
+//! Layout do canvas. Função pura: recebe, por sessão, onde a moldura fica e
+//! os nós com o tamanho de cada card; devolve molduras, retângulos (em árvore
+//! dentro de cada moldura) e arestas ortogonais em coordenadas do canvas.
+//!
+//! Molduras nunca se sobrepõem: a que cruza outra mais acima desce só na
+//! exibição, e volta quando a de cima encolhe.
 
 use std::collections::HashMap;
 
@@ -35,6 +38,9 @@ pub struct NodeSpec {
 #[derive(Clone, Debug)]
 pub struct SessionSpec {
     pub id: SessionId,
+    /// Canto superior esquerdo da moldura; `None` põe a sessão em x = 0, logo
+    /// abaixo da moldura mais baixa.
+    pub origin: Option<Pos2>,
     /// Em ordem de criação.
     pub nodes: Vec<NodeSpec>,
 }
@@ -64,6 +70,19 @@ impl SessionLayout {
     pub fn node(&self, id: AgentId) -> Option<Rect> {
         self.nodes.iter().find(|(a, _)| *a == id).map(|(_, r)| *r)
     }
+
+    fn translate(&mut self, delta: Vec2) {
+        self.frame = self.frame.translate(delta);
+        for (_, rect) in &mut self.nodes {
+            *rect = rect.translate(delta);
+        }
+        for edge in &mut self.edges {
+            for p in &mut edge.points {
+                *p += delta;
+            }
+            edge.label_at += delta;
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -83,24 +102,72 @@ impl CanvasLayout {
     }
 }
 
-/// Empilha as sessões na vertical, cada uma com sua árvore.
+/// Cada sessão na sua origem, com sua árvore. Em `sessions` fica a ordem
+/// recebida.
+///
+/// As de origem conhecida entram de cima para baixo (y, depois x): uma
+/// moldura que cruza outra já posta, com as faixas de x se cruzando, desce até
+/// `SESSION_GAP` abaixo dela. As sem origem vêm depois, em x = 0, cada uma
+/// abaixo da moldura mais baixa.
 pub fn layout(sessions: &[SessionSpec]) -> CanvasLayout {
-    let mut out = Vec::with_capacity(sessions.len());
-    let mut y = 0.0;
-    let mut bounds = Rect::NOTHING;
-    for spec in sessions {
-        let session = layout_session(spec, pos2(0.0, y));
-        y = session.frame.bottom() + SESSION_GAP;
-        bounds = bounds.union(session.frame);
-        out.push(session);
+    let mut order: Vec<usize> = (0..sessions.len())
+        .filter(|&i| sessions[i].origin.is_some())
+        .collect();
+    let origin = |i: usize| sessions[i].origin.unwrap_or_default();
+    order.sort_by(|&a, &b| {
+        let (pa, pb) = (origin(a), origin(b));
+        pa.y.total_cmp(&pb.y)
+            .then(pa.x.total_cmp(&pb.x))
+            .then(a.cmp(&b))
+    });
+
+    let mut out: Vec<Option<SessionLayout>> = vec![None; sessions.len()];
+    let mut frames: Vec<Rect> = Vec::with_capacity(sessions.len());
+    for i in order {
+        let mut session = layout_session(&sessions[i], origin(i));
+        // Desce até não cruzar nenhuma: cada volta passa de vez uma moldura.
+        while let Some(bottom) = frames
+            .iter()
+            .filter(|f| crosses(**f, session.frame))
+            .map(|f| f.bottom())
+            .max_by(f32::total_cmp)
+        {
+            let dy = bottom + SESSION_GAP - session.frame.top();
+            session.translate(vec2(0.0, dy));
+        }
+        frames.push(session.frame);
+        out[i] = Some(session);
     }
-    if out.is_empty() {
-        bounds = Rect::from_min_size(Pos2::ZERO, vec2(MIN_FRAME_W, 200.0));
+
+    let mut bottom = frames.iter().map(|f| f.bottom()).max_by(f32::total_cmp);
+    for (i, spec) in sessions.iter().enumerate() {
+        if spec.origin.is_none() {
+            let y = bottom.map_or(0.0, |b| b + SESSION_GAP);
+            let session = layout_session(spec, pos2(0.0, y));
+            bottom = Some(session.frame.bottom());
+            frames.push(session.frame);
+            out[i] = Some(session);
+        }
     }
+
+    let bounds = frames
+        .iter()
+        .copied()
+        .reduce(Rect::union)
+        .unwrap_or_else(|| Rect::from_min_size(Pos2::ZERO, vec2(MIN_FRAME_W, 200.0)));
     CanvasLayout {
-        sessions: out,
+        sessions: out.into_iter().flatten().collect(),
         bounds,
     }
+}
+
+/// `b` encosta em `a`: as faixas de x se cruzam e as de y ficam a menos de
+/// `SESSION_GAP` uma da outra.
+fn crosses(a: Rect, b: Rect) -> bool {
+    a.left() < b.right()
+        && b.left() < a.right()
+        && b.top() < a.bottom() + SESSION_GAP
+        && a.top() < b.bottom() + SESSION_GAP
 }
 
 fn layout_session(spec: &SessionSpec, origin: Pos2) -> SessionLayout {
@@ -277,6 +344,7 @@ mod tests {
         let a = ids(4);
         let spec = SessionSpec {
             id: SessionId::generate(),
+            origin: None,
             nodes: vec![
                 node(a[0], None, true),
                 node(a[1], Some(a[0]), false),
@@ -306,6 +374,7 @@ mod tests {
         let a = ids(3);
         let spec = SessionSpec {
             id: SessionId::generate(),
+            origin: None,
             nodes: vec![
                 node(a[0], None, true),
                 node(a[1], Some(a[0]), false),
@@ -336,6 +405,7 @@ mod tests {
         let a = ids(3);
         let spec = SessionSpec {
             id: SessionId::generate(),
+            origin: None,
             nodes: vec![
                 node(a[0], None, true),
                 node(a[1], None, false),
@@ -357,6 +427,7 @@ mod tests {
         let a = ids(2);
         let spec = SessionSpec {
             id: SessionId::generate(),
+            origin: None,
             nodes: vec![node(a[0], None, false), node(a[1], None, false)],
         };
         let l = layout(&[spec]);
@@ -372,6 +443,7 @@ mod tests {
         let gone = AgentId::generate();
         let spec = SessionSpec {
             id: SessionId::generate(),
+            origin: None,
             nodes: vec![
                 node(a[0], None, true),
                 node(a[1], Some(a[0]), false),
@@ -389,20 +461,132 @@ mod tests {
         assert!(s.frame.contains_rect(grand));
     }
 
+    /// Sessão com `n` workers do orquestrador (altura cresce com `n`).
+    fn session(origin: Option<Pos2>, workers: usize) -> SessionSpec {
+        let a = ids(workers + 1);
+        let mut nodes = vec![node(a[0], None, true)];
+        nodes.extend(a[1..].iter().map(|id| node(*id, Some(a[0]), false)));
+        SessionSpec {
+            id: SessionId::generate(),
+            origin,
+            nodes,
+        }
+    }
+
+    #[test]
+    fn origin_is_respected() {
+        let specs = [
+            session(Some(pos2(0.0, 0.0)), 1),
+            session(Some(pos2(1200.0, -40.0)), 3),
+            session(Some(pos2(-300.0, 900.0)), 0),
+        ];
+        let l = layout(&specs);
+        for (spec, s) in specs.iter().zip(&l.sessions) {
+            assert_eq!(s.id, spec.id, "a ordem recebida se mantém");
+            assert_eq!(s.frame.min, spec.origin.unwrap());
+            assert!(s.nodes.iter().all(|(_, r)| s.frame.contains_rect(*r)));
+        }
+        let orq = l.sessions[1].nodes[0].1;
+        assert_eq!(orq.min, pos2(1200.0 + FRAME_PAD, -40.0 + HEADER_H));
+        let edge = &l.sessions[1].edges[0];
+        assert_eq!(edge.points[0].x, orq.right());
+        assert!(l.bounds.contains_rect(l.sessions[1].frame));
+        assert!(l.bounds.contains_rect(l.sessions[2].frame));
+    }
+
+    #[test]
+    fn overlapping_frame_is_pushed_below_only_for_display() {
+        let upper = session(Some(pos2(0.0, 0.0)), 3);
+        let lower = session(Some(pos2(200.0, 100.0)), 1);
+        let l = layout(&[lower.clone(), upper.clone()]);
+        let (lo, up) = (&l.sessions[0], &l.sessions[1]);
+        assert_eq!(up.frame.min, pos2(0.0, 0.0));
+        assert_eq!(lo.frame.left(), 200.0, "só desce, não anda de lado");
+        assert_eq!(lo.frame.top(), up.frame.bottom() + SESSION_GAP);
+        assert!(!lo.frame.intersects(up.frame));
+        // Nós e arestas descem junto.
+        let orq = lo.nodes[0].1;
+        assert_eq!(orq.top(), lo.frame.top() + HEADER_H);
+        assert_eq!(lo.edges[0].points[0].y, orq.top() + ANCHOR_Y);
+
+        // Em cascata: a terceira cruza a segunda já empurrada.
+        let third = session(Some(pos2(600.0, 150.0)), 0);
+        let l = layout(&[upper.clone(), lower.clone(), third]);
+        let [a, b, c] = [&l.sessions[0], &l.sessions[1], &l.sessions[2]];
+        assert_eq!(b.frame.top(), a.frame.bottom() + SESSION_GAP);
+        assert_eq!(c.frame.top(), b.frame.bottom() + SESSION_GAP);
+    }
+
+    #[test]
+    fn pushed_frame_returns_when_the_upper_one_shrinks() {
+        let lower_origin = pos2(0.0, 500.0);
+        let tall = layout(&[session(Some(Pos2::ZERO), 6), session(Some(lower_origin), 0)]);
+        assert!(tall.sessions[1].frame.top() > lower_origin.y);
+        let short = layout(&[session(Some(Pos2::ZERO), 1), session(Some(lower_origin), 0)]);
+        assert_eq!(short.sessions[1].frame.min, lower_origin);
+    }
+
+    #[test]
+    fn side_by_side_frames_are_not_pushed() {
+        let left = session(Some(pos2(0.0, 0.0)), 4);
+        let width = layout(std::slice::from_ref(&left)).sessions[0]
+            .frame
+            .width();
+        // Encostada à direita (faixas de x só se tocam) e mais abaixo.
+        let right = session(Some(pos2(width, 60.0)), 1);
+        let l = layout(&[left, right]);
+        assert_eq!(l.sessions[1].frame.min, pos2(width, 60.0));
+    }
+
+    #[test]
+    fn the_higher_origin_wins_and_ties_go_by_x() {
+        // Quem tem a origem mais acima fica; a outra desce, mesmo vindo antes.
+        let a = session(Some(pos2(100.0, 40.0)), 2);
+        let b = session(Some(pos2(0.0, 0.0)), 2);
+        let l = layout(&[a.clone(), b.clone()]);
+        assert_eq!(l.sessions[1].frame.min, pos2(0.0, 0.0));
+        assert_eq!(
+            l.sessions[0].frame.top(),
+            l.sessions[1].frame.bottom() + SESSION_GAP
+        );
+        let c = session(Some(pos2(300.0, 0.0)), 0);
+        let l = layout(&[c, b]);
+        assert_eq!(l.sessions[1].frame.min, pos2(0.0, 0.0));
+        assert!(l.sessions[0].frame.top() > 0.0);
+    }
+
+    #[test]
+    fn sessions_without_origin_go_below_the_lowest_frame() {
+        let placed = session(Some(pos2(900.0, 300.0)), 2);
+        let l = layout(&[session(None, 0), placed, session(None, 1)]);
+        let low = l.sessions[1].frame;
+        let first = l.sessions[0].frame;
+        assert_eq!(first.min, pos2(0.0, low.bottom() + SESSION_GAP));
+        assert_eq!(
+            l.sessions[2].frame.min,
+            pos2(0.0, first.bottom() + SESSION_GAP)
+        );
+        let alone = layout(&[session(None, 0)]);
+        assert_eq!(alone.sessions[0].frame.min, Pos2::ZERO);
+    }
+
     #[test]
     fn sessions_stack_without_overlap() {
         let a = ids(3);
         let specs = [
             SessionSpec {
                 id: SessionId::generate(),
+                origin: None,
                 nodes: vec![node(a[0], None, true), node(a[1], Some(a[0]), false)],
             },
             SessionSpec {
                 id: SessionId::generate(),
+                origin: None,
                 nodes: vec![],
             },
             SessionSpec {
                 id: SessionId::generate(),
+                origin: None,
                 nodes: vec![node(a[2], None, true)],
             },
         ];
