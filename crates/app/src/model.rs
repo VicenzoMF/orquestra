@@ -98,11 +98,27 @@ pub struct AgentView {
     pub last_error: Option<String>,
     /// Ordem de criação (estável entre frames).
     pub order: u64,
+    /// Orquestrador parado enquanto os filhos trabalham: espera os agentes,
+    /// não você (o `wait_for` em segundo plano o acorda).
+    pub watching: bool,
 }
 
 impl AgentView {
     pub fn kind(&self) -> StatusKind {
-        StatusKind::of(&self.status)
+        if self.watching {
+            StatusKind::Running
+        } else {
+            StatusKind::of(&self.status)
+        }
+    }
+
+    /// Rótulo do status para o card e o painel.
+    pub fn status_text(&self) -> String {
+        if self.watching {
+            "aguardando agentes".to_owned()
+        } else {
+            status_label(&self.status)
+        }
     }
 
     pub fn is_orchestrator(&self) -> bool {
@@ -242,8 +258,10 @@ impl Model {
                         page: None,
                         last_error: None,
                         order,
+                        watching: false,
                     },
                 );
+                self.refresh_watching(config.session);
             }
             AgentEvent::Spawned { info } => {
                 if let Some(agent) = self.agents.get_mut(&info.id) {
@@ -253,6 +271,8 @@ impl Model {
             AgentEvent::StatusChanged { id, status } => {
                 if let Some(agent) = self.agents.get_mut(id) {
                     agent.status = status.clone();
+                    let session = agent.config.session;
+                    self.refresh_watching(session);
                 }
             }
             AgentEvent::Removed { id } => {
@@ -263,6 +283,7 @@ impl Model {
                     if session.orchestrator == Some(*id) {
                         session.orchestrator = None;
                     }
+                    self.refresh_watching(agent.config.session);
                 }
             }
             AgentEvent::BrowserStatus { id, status } => {
@@ -296,6 +317,21 @@ impl Model {
             | AgentEvent::Replay { .. }
             | AgentEvent::BrowserFrame { .. }
             | AgentEvent::History(_) => {}
+        }
+    }
+
+    /// O orquestrador da sessão terminou o turno, mas algum filho ainda não
+    /// acabou: quem precisa de você é o filho, se precisar.
+    fn refresh_watching(&mut self, session: SessionId) {
+        let Some(orq) = self.sessions.get(&session).and_then(|s| s.orchestrator) else {
+            return;
+        };
+        let busy = self
+            .agents
+            .values()
+            .any(|a| a.config.parent == Some(orq) && a.status.is_alive());
+        if let Some(agent) = self.agents.get_mut(&orq) {
+            agent.watching = busy && agent.status == AgentStatus::WaitingForInput;
         }
     }
 
@@ -420,21 +456,7 @@ impl Model {
                 format!("{} aguardando aprovação", c.approval),
                 Some(StatusKind::Approval),
             )
-        } else if c.running + c.starting > 0 {
-            // "N rodando" conta só workers, como o "N agentes" ao lado.
-            let workers = self
-                .agents_of(session)
-                .iter()
-                .filter(|a| {
-                    !a.is_orchestrator()
-                        && matches!(a.kind(), StatusKind::Running | StatusKind::Starting)
-                })
-                .count();
-            let text = if workers == 0 {
-                "orquestrador rodando".to_owned()
-            } else {
-                format!("{workers} rodando")
-            };
+        } else if let Some(text) = self.running_summary(session) {
             (text, Some(StatusKind::Running))
         } else if c.queued > 0 {
             (format!("{} na fila", c.queued), Some(StatusKind::Queued))
@@ -442,6 +464,27 @@ impl Model {
             ("concluída".to_owned(), Some(StatusKind::Done))
         } else {
             ("vazia".to_owned(), None)
+        }
+    }
+
+    /// "N rodando" conta só workers, como o "N agentes" ao lado; sem workers
+    /// rodando, só o orquestrador trabalhando de fato (não esperando os filhos).
+    fn running_summary(&self, session: SessionId) -> Option<String> {
+        let agents = self.agents_of(session);
+        let busy = |a: &AgentView| matches!(a.kind(), StatusKind::Running | StatusKind::Starting);
+        let workers = agents
+            .iter()
+            .filter(|a| !a.is_orchestrator() && busy(a))
+            .count();
+        if workers > 0 {
+            Some(format!("{workers} rodando"))
+        } else if agents
+            .iter()
+            .any(|a| a.is_orchestrator() && !a.watching && busy(a))
+        {
+            Some("orquestrador rodando".to_owned())
+        } else {
+            None
         }
     }
 
@@ -595,6 +638,54 @@ mod tests {
         m.apply(&ev);
         m.apply(&status(w, AgentStatus::Running));
         assert_eq!(m.session_summary(s).0, "1 rodando");
+    }
+
+    /// Orquestrador que terminou o turno com filhos trabalhando espera os
+    /// agentes, não você; com todos prontos, volta a ser com você.
+    #[test]
+    fn orchestrator_idle_with_busy_children_is_watching() {
+        let mut m = Model::new(8);
+        let (s, ev) = session_created("loja");
+        m.apply(&ev);
+        let (orq, ev) = created(s, "orquestrador", AgentRole::Orchestrator, None);
+        m.apply(&ev);
+        m.apply(&status(orq, AgentStatus::WaitingForInput));
+        let orq_view = |m: &Model| m.agent(orq).unwrap().clone();
+        assert!(!orq_view(&m).watching, "sem filhos, é com você");
+
+        let (w, ev) = created(s, "api", AgentRole::Worker, Some(orq));
+        m.apply(&ev);
+        m.apply(&status(w, AgentStatus::Running));
+        let o = orq_view(&m);
+        assert!(o.watching);
+        assert_eq!(o.kind(), StatusKind::Running);
+        assert_eq!(o.status_text(), "aguardando agentes");
+        assert!(m.attention().is_empty());
+        assert_eq!(m.counts(Some(s)).waiting, 0);
+        assert_eq!(m.session_summary(s).0, "1 rodando");
+
+        // O filho pede você: ele entra na fila, o orquestrador continua esperando.
+        m.apply(&status(w, AgentStatus::WaitingForInput));
+        assert!(orq_view(&m).watching);
+        assert_eq!(m.attention().len(), 1);
+        assert_eq!(m.attention()[0].agent, w);
+
+        // Filho pronto: o orquestrador, parado, volta a esperar você.
+        m.apply(&status(w, AgentStatus::Done { exit_code: Some(0) }));
+        let o = orq_view(&m);
+        assert!(!o.watching);
+        assert_eq!(o.status_text(), "aguardando você");
+        assert_eq!(m.attention()[0].agent, orq);
+
+        // Rodando de novo não é "esperando agentes", nem com filho vivo.
+        let (w2, ev) = created(s, "docs", AgentRole::Worker, Some(orq));
+        m.apply(&ev);
+        assert!(orq_view(&m).watching, "filho recém-criado já conta");
+        m.apply(&status(orq, AgentStatus::Running));
+        assert!(!orq_view(&m).watching);
+        m.apply(&status(orq, AgentStatus::WaitingForInput));
+        m.apply(&AgentEvent::Removed { id: w2 });
+        assert!(!orq_view(&m).watching);
     }
 
     #[test]

@@ -6,7 +6,10 @@
 //! - `ORQUESTRA_DEMO_SELECT=nome`: seleciona o agente com esse nome;
 //! - `ORQUESTRA_DEMO_TAB=navegador`: abre a aba do navegador;
 //! - `ORQUESTRA_DEMO_FOCUS=prefixo`: foca a sessão cujo nome começa assim;
-//! - `ORQUESTRA_DEMO_DIALOG=nova|avulso|config`: abre um diálogo.
+//! - `ORQUESTRA_DEMO_DIALOG=nova|avulso|config`: abre um diálogo;
+//! - `ORQUESTRA_DEMO_MENU=1`: abre a lista "Orquestrações" (`meio`: abre
+//!   pouco antes do screenshot, para pegar a animação no meio);
+//! - `ORQUESTRA_DEMO_ZOOM=fator`: zoom do canvas (ex.: `1.4`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,7 +30,10 @@ pub struct DevHooks {
     browser_tab: bool,
     focus: Option<String>,
     dialog: Option<String>,
+    menu: Option<String>,
+    zoom: Option<f32>,
     prepared: bool,
+    menu_opened: bool,
     requested: bool,
     saved: Arc<AtomicBool>,
 }
@@ -47,7 +53,10 @@ impl DevHooks {
             browser_tab: var("ORQUESTRA_DEMO_TAB").is_some_and(|t| t.starts_with("nav")),
             focus: var("ORQUESTRA_DEMO_FOCUS"),
             dialog: var("ORQUESTRA_DEMO_DIALOG"),
+            menu: var("ORQUESTRA_DEMO_MENU"),
+            zoom: var("ORQUESTRA_DEMO_ZOOM").and_then(|v| v.parse().ok()),
             prepared: false,
+            menu_opened: false,
             requested: false,
             saved: Arc::new(AtomicBool::new(false)),
         }
@@ -66,8 +75,22 @@ impl DevHooks {
             return;
         };
         let elapsed = self.start.elapsed();
+        if let Some(menu) = &self.menu {
+            let at = if menu == "meio" {
+                self.delay.saturating_sub(Duration::from_millis(120))
+            } else {
+                self.delay.mul_f64(0.7)
+            };
+            if !self.menu_opened && elapsed >= at {
+                self.menu_opened = true;
+                st.menu.set(true, ctx.input(|i| i.time));
+            }
+        }
         if !self.prepared && elapsed >= self.delay.mul_f64(0.7) {
             self.prepared = true;
+            if let Some(zoom) = self.zoom {
+                canvas.zoom_to(zoom);
+            }
             match self.dialog.as_deref() {
                 Some("nova") => dialogs.open_new_orchestration(cx.config),
                 Some("avulso") => dialogs.open_solo(cx, st),

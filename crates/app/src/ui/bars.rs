@@ -8,7 +8,6 @@ use super::dialogs::Dialogs;
 use super::widgets;
 use super::{Ctx, UiState};
 use crate::model::plural;
-use crate::sysinfo::RamMeter;
 use crate::theme;
 
 fn logo(ui: &mut Ui) {
@@ -76,7 +75,9 @@ pub fn top_bar(
     });
 }
 
-pub fn status_bar(ui: &mut Ui, cx: &Ctx, ram: &mut RamMeter) {
+/// Contagens e saúde do hub. Vagas, navegadores e RAM ficam nos recursos,
+/// no canto do canvas.
+pub fn status_bar(ui: &mut Ui, cx: &Ctx) {
     let m = cx.model;
     let c = m.counts(None);
     let sessions = m.sessions().len() as u32;
@@ -110,16 +111,6 @@ pub fn status_bar(ui: &mut Ui, cx: &Ctx, ram: &mut RamMeter) {
             let verb = if c.failed == 1 { "falhou" } else { "falharam" };
             ui.label(small(format!("{} {verb}", c.failed), theme::FAILED));
         }
-        ui.separator();
-        ui.label(small(
-            plural(m.browsers_open(), "navegador", "navegadores"),
-            theme::TEXT_DIM,
-        ));
-        ui.separator();
-        ui.label(small(
-            format!("RAM do app {}", ram.label()),
-            theme::TEXT_DIM,
-        ));
         ui.separator();
         let (text, color) = if !m.hub_alive {
             ("hub encerrado", theme::FAILED)

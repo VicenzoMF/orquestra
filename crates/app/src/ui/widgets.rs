@@ -152,22 +152,6 @@ pub fn gear_button(ui: &mut Ui) -> Response {
     response.on_hover_text("Configurações")
 }
 
-/// Título de seção do painel lateral.
-pub fn section_title(ui: &mut Ui, text: &str, count: Option<usize>) {
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(text).size(13.5).strong().color(theme::TEXT));
-        if let Some(n) = count {
-            ui.label(
-                RichText::new(format!("({n})"))
-                    .size(13.0)
-                    .color(theme::TEXT_DIM),
-            );
-        }
-    });
-    ui.add_space(2.0);
-}
-
 /// Botão com destaque (ação principal).
 pub fn accent_button(text: &str) -> egui::Button<'static> {
     egui::Button::new(RichText::new(text.to_owned()).color(Color32::from_rgb(0x0d, 0x1b, 0x2a)))

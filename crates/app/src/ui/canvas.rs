@@ -1,21 +1,26 @@
 //! Canvas com pan/zoom (`egui::Scene`): uma moldura por sessão, orquestrador
 //! à esquerda, workers em coluna, ligados por linhas ortogonais na cor do
-//! status do filho.
+//! status do filho. Por cima, fixos na tela, os painéis de `overlay`.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 
+use egui::emath::TSTransform;
+use egui::layers::ShapeIdx;
+use egui::text::LayoutJob;
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontId, Id, Key, Layout, Margin, Pos2, Rect, RichText,
-    Scene, Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, Vec2, pos2, vec2,
+    Align, Align2, Color32, CornerRadius, FontId, Id, Key, LayerId, Layout, Margin, Pos2, Rect,
+    RichText, Scene, Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, Vec2, pos2, vec2,
 };
 use orquestra_core::{AgentStatus, Command, QueueReason, SessionId};
 
+use super::overlay::{self, INSET_BOTTOM, INSET_TOP};
 use super::widgets::{self, kind_label, paint_elided};
 use super::{Ctx, Resources, UiState};
 use crate::actions;
 use crate::browser::fit_rect;
 use crate::layout::{self, ANCHOR_Y, CanvasLayout, Edge, NodeSpec, SessionLayout, SessionSpec};
-use crate::model::{AgentView, Model, SessionView, StatusKind, plural, status_label};
+use crate::model::{AgentView, Model, SessionView, StatusKind, plural};
 use crate::term::{Choice, Preview};
 use crate::theme;
 
@@ -67,6 +72,16 @@ impl CanvasState {
         let outer = self.viewport;
         let z = (effective_zoom(outer, self.scene_rect) * factor).clamp(ZOOM_MIN, ZOOM_MAX);
         self.scene_rect = Rect::from_center_size(self.scene_rect.center(), outer.size() / z);
+        self.auto_fit = false;
+        self.update_detail(z);
+    }
+
+    /// Zoom fixo em torno do centro (ganchos de screenshot).
+    #[cfg(feature = "screenshot")]
+    pub fn zoom_to(&mut self, zoom: f32) {
+        let z = zoom.clamp(ZOOM_MIN, ZOOM_MAX);
+        self.scene_rect =
+            Rect::from_center_size(self.scene_rect.center(), self.viewport.size() / z);
         self.auto_fit = false;
         self.update_detail(z);
     }
@@ -151,13 +166,24 @@ fn structure_hash(model: &Model) -> u64 {
 }
 
 fn fit(cs: &mut CanvasState, model: &Model, focus: Option<SessionId>, outer: Rect) {
+    // Enquadra na faixa livre entre o botão de cima e os recursos de baixo.
+    let free = Rect::from_min_max(
+        outer.min + vec2(0.0, INSET_TOP),
+        outer.max - vec2(0.0, INSET_BOTTOM),
+    );
     let target = |detailed: bool| {
         let l = layout::layout(&specs(model, |s| detailed || focus == Some(s)));
         let rect = focus
             .and_then(|f| l.session(f).map(|s| s.frame))
             .unwrap_or(l.bounds)
             .expand(28.0);
-        (rect, effective_zoom(outer, rect))
+        let zoom = effective_zoom(free, rect);
+        // As faixas em unidades da cena, para o `Scene` centrar na faixa livre.
+        let rect = Rect::from_min_max(
+            rect.min - vec2(0.0, INSET_TOP / zoom),
+            rect.max + vec2(0.0, INSET_BOTTOM / zoom),
+        );
+        (rect, zoom)
     };
     let (rect, zoom) = target(true);
     if zoom >= DETAIL_OFF + 0.05 {
@@ -205,13 +231,20 @@ pub fn show(
 
     let mut scene_rect = cs.scene_rect;
     let zoom = cs.zoom;
+    let mut scene_layer = None;
     let response = Scene::new()
         .zoom_range(ZOOM_MIN..=ZOOM_MAX)
         .max_inner_size(Vec2::splat(100_000.0))
         .show(ui, &mut scene_rect, |ui| {
+            scene_layer = Some(ui.layer_id());
             draw(ui, cx, st, res, &layout, detailed, zoom);
         })
         .response;
+    if let Some(layer) = scene_layer
+        && let Some(to_screen) = ui.ctx().layer_transform_to_global(layer)
+    {
+        sharpen_text(ui.ctx(), layer, to_screen.scaling);
+    }
     cs.scene_rect = scene_rect;
     if response.changed() {
         cs.auto_fit = false;
@@ -221,7 +254,74 @@ pub fn show(
     }
     if response.clicked() {
         st.selected = None;
+        st.menu.set(false, ui.input(|i| i.time));
     }
+    overlay::show(ui, cx, st, cs, res, dialogs, outer);
+}
+
+/// Texto nítido em qualquer zoom. O `Scene` escala as formas da camada, e um
+/// texto escalado é a mesma rasterização esticada (borrada ao aproximar,
+/// serrilhada ao afastar). Aqui cada texto é refeito no tamanho em que vai
+/// aparecer e encolhido de volta: a escala da camada o devolve a esse tamanho,
+/// agora com glifos rasterizados nele.
+fn sharpen_text(ctx: &egui::Context, layer: LayerId, zoom: f32) {
+    // Degraus de 1/24 de oitava (erro abaixo de 1,5%): poucos tamanhos novos
+    // no atlas de fontes enquanto o zoom anda.
+    let k = ((zoom.log2() * 24.0).round() / 24.0).exp2();
+    if !k.is_finite() || (k - 1.0).abs() < 1e-3 {
+        return;
+    }
+    let jobs: Vec<(usize, Arc<LayoutJob>)> = ctx.graphics(|g| {
+        g.get(layer).map_or_else(Vec::new, |list| {
+            list.all_entries()
+                .enumerate()
+                .filter_map(|(i, clipped)| match &clipped.shape {
+                    Shape::Text(text) => Some((i, text.galley.job.clone())),
+                    _ => None,
+                })
+                .collect()
+        })
+    });
+    if jobs.is_empty() {
+        return;
+    }
+    let galleys: Vec<_> = ctx.fonts_mut(|fonts| {
+        jobs.into_iter()
+            .map(|(i, job)| (i, fonts.layout_job(scaled_job(&job, k))))
+            .collect()
+    });
+    ctx.graphics_mut(|g| {
+        let list = g.entry(layer);
+        for (i, galley) in galleys {
+            list.mutate_shape(ShapeIdx(i), |clipped| {
+                if let Shape::Text(text) = &mut clipped.shape {
+                    text.galley = galley;
+                    text.underline.width *= k;
+                    // Encolhe 1/k em torno da própria posição.
+                    let pos = text.pos.to_vec2();
+                    text.transform(TSTransform::new(pos * (1.0 - 1.0 / k), 1.0 / k));
+                }
+            });
+        }
+    });
+}
+
+/// O mesmo texto `k` vezes maior.
+fn scaled_job(job: &LayoutJob, k: f32) -> LayoutJob {
+    let mut job = job.clone();
+    for section in &mut job.sections {
+        section.leading_space *= k;
+        let format = &mut section.format;
+        format.font_id.size *= k;
+        format.extra_letter_spacing *= k;
+        format.line_height = format.line_height.map(|h| h * k);
+        format.expand_bg *= k;
+        format.underline.width *= k;
+        format.strikethrough.width *= k;
+    }
+    job.wrap.max_width *= k;
+    job.first_row_min_height *= k;
+    job
 }
 
 fn toolbar(
@@ -494,8 +594,7 @@ fn draw_edge(painter: &egui::Painter, edge: &Edge, child: &AgentView) {
     );
 }
 
-fn card_frame(painter: &egui::Painter, rect: Rect, agent: &AgentView, selected: bool) {
-    let kind = agent.kind();
+fn card_frame(painter: &egui::Painter, rect: Rect, kind: StatusKind, selected: bool) {
     painter.rect_filled(rect, CornerRadius::same(10), theme::CARD);
     let border = match kind {
         StatusKind::Waiting => theme::WAITING.gamma_multiply(0.8),
@@ -567,16 +666,31 @@ fn context_line(agent: &AgentView, preview: &Preview) -> (String, Color32) {
     }
 }
 
-/// Pergunta de sim/não na tela de um agente que espera o humano.
+/// Pergunta de sim/não na tela de um agente parado. Vale também para o
+/// orquestrador que espera os filhos: a pergunta na tela é com você.
 fn pending_choice<'a>(agent: &AgentView, preview: &'a Preview) -> Option<&'a Choice> {
     preview
         .choice
         .as_ref()
-        .filter(|_| agent.kind() == StatusKind::Waiting)
+        .filter(|_| agent.status == AgentStatus::WaitingForInput)
 }
 
-fn card_header(painter: &egui::Painter, rect: Rect, agent: &AgentView, title: &str, star: bool) {
-    let kind = agent.kind();
+/// Estado mostrado no card: o do agente, ou "aguardando você" se a tela pergunta.
+fn shown_status(agent: &AgentView, asking: bool) -> (StatusKind, String) {
+    if asking {
+        (StatusKind::Waiting, StatusKind::Waiting.label().to_owned())
+    } else {
+        (agent.kind(), agent.status_text())
+    }
+}
+
+fn card_header(
+    painter: &egui::Painter,
+    rect: Rect,
+    (kind, label): (StatusKind, String),
+    title: &str,
+    star: bool,
+) {
     let y = rect.top() + ANCHOR_Y;
     let x = rect.left() + 16.0;
     let mut name_x = x + 18.0;
@@ -589,7 +703,7 @@ fn card_header(painter: &egui::Painter, rect: Rect, agent: &AgentView, title: &s
     let status = painter.text(
         pos2(rect.right() - 14.0, y),
         Align2::RIGHT_CENTER,
-        status_label(&agent.status),
+        label,
         FontId::proportional(12.0),
         theme::status_color(kind),
     );
@@ -623,8 +737,11 @@ fn worker_card(
         st.select(agent.id);
     }
     let painter = ui.painter().clone();
-    card_frame(&painter, rect, agent, st.selected == Some(agent.id));
-    card_header(&painter, rect, agent, &agent.config.name, false);
+    let preview = cx.shared.preview(agent.id);
+    let choice = pending_choice(agent, &preview);
+    let shown = shown_status(agent, choice.is_some());
+    card_frame(&painter, rect, shown.0, st.selected == Some(agent.id));
+    card_header(&painter, rect, shown, &agent.config.name, false);
 
     // Tipo e badge do navegador.
     let x = rect.left() + 16.0;
@@ -656,7 +773,6 @@ fn worker_card(
         painter.galley(badge.min + vec2(6.0, 2.0), galley, theme::ACCENT);
     }
 
-    let preview = cx.shared.preview(agent.id);
     let (line, color) = context_line(agent, &preview);
     paint_elided(
         &painter,
@@ -699,7 +815,6 @@ fn worker_card(
             y += THUMB_H;
         }
         if agent.kind() == StatusKind::Waiting {
-            let choice = pending_choice(agent, &preview);
             reply_row(ui, cx, st, agent, choice, pos2(rect.left() + 12.0, y));
             y += ROW_H;
         }
@@ -847,8 +962,11 @@ fn orchestrator_card(
         st.select(agent.id);
     }
     let painter = ui.painter().clone();
-    card_frame(&painter, rect, agent, st.selected == Some(agent.id));
-    card_header(&painter, rect, agent, "orquestrador", true);
+    let preview = cx.shared.preview(agent.id);
+    let choice = pending_choice(agent, &preview);
+    let shown = shown_status(agent, choice.is_some());
+    card_frame(&painter, rect, shown.0, st.selected == Some(agent.id));
+    card_header(&painter, rect, shown, "orquestrador", true);
     let x = rect.left() + 16.0;
     let w = rect.width() - 32.0;
     painter.text(
@@ -904,7 +1022,6 @@ fn orchestrator_card(
         painter.rect_filled(fill, CornerRadius::same(3), theme::DONE);
     }
 
-    let preview = cx.shared.preview(agent.id);
     let (line, color) = context_line(agent, &preview);
     paint_elided(
         &painter,
@@ -917,7 +1034,7 @@ fn orchestrator_card(
     );
 
     // Pergunta na tela (permissão, confiança na pasta): Sim/Não no lugar do campo.
-    if let Some(choice) = pending_choice(agent, &preview) {
+    if let Some(choice) = choice {
         reply_row(ui, cx, st, agent, Some(choice), pos2(x, rect.top() + 166.0));
         return;
     }

@@ -10,7 +10,7 @@
 //! - **Recorder**: thread dedicada que assina o canal principal, repassa tudo
 //!   ao `Store` e transforma transições de status em notificações.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::sync::{Arc, PoisonError, RwLock};
 use std::thread::JoinHandle;
@@ -657,6 +657,9 @@ where
     fn record_loop(&self, mut rx: EventReceiver) {
         let mut names: HashMap<AgentId, String> = HashMap::new();
         let mut last: HashMap<AgentId, AgentStatus> = HashMap::new();
+        // Pai de cada agente criado por outro, e quem é orquestrador.
+        let mut parents: HashMap<AgentId, AgentId> = HashMap::new();
+        let mut orchestrators: HashSet<AgentId> = HashSet::new();
         loop {
             let event = match rx.blocking_recv() {
                 Ok(event) => event,
@@ -672,9 +675,25 @@ where
             match &event {
                 AgentEvent::Created { id, config } => {
                     names.insert(*id, config.name.clone());
+                    if let Some(parent) = config.parent {
+                        parents.insert(*id, parent);
+                    }
+                    if config.role == AgentRole::Orchestrator {
+                        orchestrators.insert(*id);
+                    }
                 }
                 AgentEvent::StatusChanged { id, status } => {
                     let prev = last.insert(*id, status.clone());
+                    // Orquestrador que parou com filhos trabalhando espera os
+                    // agentes, não o humano: quem precisar avisa por si.
+                    let watching = *status == AgentStatus::WaitingForInput
+                        && orchestrators.contains(id)
+                        && parents.iter().any(|(child, parent)| {
+                            parent == id && last.get(child).is_none_or(AgentStatus::is_alive)
+                        });
+                    if watching {
+                        continue;
+                    }
                     let name = names.get(id).map_or("agente", String::as_str);
                     let cfg = self
                         .notifications
@@ -690,6 +709,8 @@ where
                 AgentEvent::Removed { id } => {
                     names.remove(id);
                     last.remove(id);
+                    parents.remove(id);
+                    orchestrators.remove(id);
                 }
                 AgentEvent::Shutdown => break,
                 _ => {}
@@ -715,7 +736,6 @@ fn ignore_unknown(result: Result<()>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use std::sync::Mutex;
 
     use bytes::Bytes;
@@ -1477,6 +1497,55 @@ mod tests {
             ]
         );
         assert_eq!(notifications.lock().unwrap()[0].title, "claude-1");
+    }
+
+    /// O orquestrador para à espera dos filhos (`wait_for` em segundo plano):
+    /// isso não é "aguardando sua resposta". Sem filho vivo, é.
+    #[tokio::test]
+    async fn orchestrator_waiting_on_its_children_does_not_notify() {
+        let mut h = Harness::start(Opts::default());
+        let s = h.session(loja()).await;
+        let (orq, w) = (AgentId::generate(), AgentId::generate());
+        h.send(spawn(
+            orq,
+            AgentConfig {
+                role: AgentRole::Orchestrator,
+                ..agent(s, "orquestrador")
+            },
+        ));
+        h.until(|e| matches!(e, AgentEvent::Spawned { info } if info.id == orq))
+            .await;
+        h.send(spawn(
+            w,
+            AgentConfig {
+                parent: Some(orq),
+                ..agent(s, "api")
+            },
+        ));
+        h.until(|e| matches!(e, AgentEvent::Spawned { info } if info.id == w))
+            .await;
+
+        let publish = |id, status| h.bus.publish(AgentEvent::StatusChanged { id, status });
+        publish(orq, AgentStatus::WaitingForInput);
+        publish(w, AgentStatus::Done { exit_code: Some(0) });
+        publish(orq, AgentStatus::Running);
+        publish(orq, AgentStatus::WaitingForInput);
+        let notifications = h.notifications.clone();
+        h.shutdown().await;
+
+        let sent: Vec<_> = notifications
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|n| (n.title.clone(), n.kind))
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                ("api".to_owned(), NotificationKind::Finished),
+                ("orquestrador".to_owned(), NotificationKind::NeedsInput),
+            ]
+        );
     }
 
     #[tokio::test]

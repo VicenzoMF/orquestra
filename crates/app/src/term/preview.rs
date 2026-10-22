@@ -12,6 +12,8 @@ const MENU_SCAN: usize = 16;
 const MENU_FOOTER: usize = 3;
 /// Maior distância entre os traços da caixa de entrada (entrada multilinha).
 const INPUT_BOX_MAX: usize = 12;
+/// Quadros do spinner do Claude Code.
+const SPINNER: [char; 7] = ['·', '✢', '✳', '*', '✶', '✻', '✽'];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Preview {
@@ -67,15 +69,13 @@ fn clean(row: &str) -> String {
 }
 
 /// Spinner ou resumo de turno na coluna 0: "✻ Whisking… (3s)", "✻ Churned
-/// for 11s". Muda a cada quadro e não diz o que o agente está fazendo.
+/// for 11s". Muda a cada quadro e não diz o que o agente está fazendo. O
+/// glifo gira entre `SPINNER` (`*` no lugar de `✳` em alguns terminais).
 fn is_spinner(row: &str) -> bool {
     let mut chars = row.chars();
-    let glyph = chars.next().is_some_and(|c| {
-        matches!(
-            c,
-            '·' | '✢' | '✳' | '✶' | '✻' | '✽' | '\u{2800}'..='\u{28ff}'
-        )
-    });
+    let glyph = chars
+        .next()
+        .is_some_and(|c| SPINNER.contains(&c) || ('\u{2800}'..='\u{28ff}').contains(&c));
     glyph && chars.next() == Some(' ') && (row.contains('…') || row.contains(" for "))
 }
 
@@ -305,12 +305,20 @@ mod tests {
 
     #[test]
     fn claude_running_shows_the_tool_not_the_spinner() {
-        let p = of(include_str!("fixtures/claude-running.txt"));
-        assert_eq!(p.choice, None);
-        assert_eq!(
-            &p.lines[p.lines.len() - 2..],
-            ["Bash(sleep 6 && date > lento.txt)", "Running…"]
-        );
+        // Em qualquer quadro do spinner: senão a última linha pisca entre o
+        // spinner e a ferramenta.
+        let text = include_str!("fixtures/claude-running.txt");
+        for frame in SPINNER {
+            let p = of(&text.replace('✻', &frame.to_string()));
+            assert_eq!(p.choice, None);
+            assert_eq!(
+                &p.lines[p.lines.len() - 2..],
+                ["Bash(sleep 6 && date > lento.txt)", "Running…"],
+                "quadro {frame}"
+            );
+        }
+        let long = of("● Bash(cargo clippy)\n* Tinkering… (4m 24s · thinking some more)");
+        assert_eq!(long.lines, ["● Bash(cargo clippy)"]);
     }
 
     #[test]

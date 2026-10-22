@@ -1,5 +1,6 @@
-//! App eframe: barra superior, canvas, painel lateral, barra de status e
-//! diálogos. Lê o `Model` (montado pela task de eventos) e só manda `Command`.
+//! App eframe: barra superior, canvas com os painéis flutuantes, painel do
+//! agente selecionado, barra de status e diálogos. Lê o `Model` (montado pela
+//! task de eventos) e só manda `Command`.
 
 mod bars;
 mod browser_view;
@@ -7,6 +8,7 @@ mod canvas;
 #[cfg(feature = "screenshot")]
 mod dev;
 mod dialogs;
+mod overlay;
 mod side;
 mod widgets;
 
@@ -57,6 +59,10 @@ pub struct UiState {
     pub last_term_size: Option<TermSize>,
     /// Agente recém-pedido ao hub e já selecionado; o `Created` ainda não chegou.
     pub awaiting: Option<(AgentId, std::time::Instant)>,
+    /// Lista "Orquestrações" do canvas.
+    pub menu: overlay::Menu,
+    /// "Precisa de você" recolhido.
+    pub attention_collapsed: bool,
 }
 
 impl Default for UiState {
@@ -72,6 +78,8 @@ impl Default for UiState {
             thumb_browsers: Vec::new(),
             last_term_size: None,
             awaiting: None,
+            menu: overlay::Menu::default(),
+            attention_collapsed: false,
         }
     }
 }
@@ -212,7 +220,12 @@ impl OrquestraApp {
             && !self.dialogs.any_open()
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
         {
-            self.st.selected = None;
+            // Primeiro fecha a lista de orquestrações; depois, a seleção.
+            if self.st.menu.open {
+                self.st.menu.set(false, ctx.input(|i| i.time));
+            } else {
+                self.st.selected = None;
+            }
         }
     }
 }
@@ -344,26 +357,29 @@ impl OrquestraApp {
                     .fill(theme::PANEL_ALT)
                     .inner_margin(egui::Margin::symmetric(14, 5)),
             )
-            .show(ui, |ui| bars::status_bar(ui, &cx, &mut self.res.ram));
-        Panel::right("side")
-            .resizable(true)
-            .default_size(600.0)
-            .size_range(340.0..=1100.0)
-            .frame(
-                Frame::new()
-                    .fill(theme::PANEL)
-                    .inner_margin(egui::Margin::same(12)),
-            )
-            .show(ui, |ui| {
-                side::show(
-                    ui,
-                    &cx,
-                    &mut self.st,
-                    &mut self.res,
-                    &mut self.canvas,
-                    &mut self.dialogs,
+            .show(ui, |ui| bars::status_bar(ui, &cx));
+        // O painel só existe com um agente selecionado: o resto flutua no canvas.
+        if let Some(agent) = self.st.selected.and_then(|id| model.agent(id)) {
+            Panel::right("side")
+                .resizable(true)
+                .default_size(600.0)
+                .size_range(340.0..=1100.0)
+                .frame(
+                    Frame::new()
+                        .fill(theme::PANEL)
+                        .inner_margin(egui::Margin::same(12)),
                 )
-            });
+                .show(ui, |ui| {
+                    side::show(
+                        ui,
+                        &cx,
+                        &mut self.st,
+                        &mut self.res,
+                        agent,
+                        &mut self.dialogs,
+                    )
+                });
+        }
         CentralPanel::default()
             .frame(Frame::new().fill(theme::BG))
             .show(ui, |ui| {
