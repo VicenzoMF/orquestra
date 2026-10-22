@@ -237,6 +237,16 @@ impl Inner {
                 }
                 self.launch(&req, path, None)
             }
+            Workspace::Restore { path, worktree } => {
+                if !path.is_dir() {
+                    return Err(Error::Spawn(format!(
+                        "a pasta do agente não existe mais: {}",
+                        path.display()
+                    )));
+                }
+                // O worktree já existe: falhar aqui não o apaga.
+                self.launch(&req, path, worktree.clone())
+            }
             Workspace::Worktree { repo, base, branch } => {
                 let root = worktree::root_dir(&self.config)?;
                 let created = worktree::create(

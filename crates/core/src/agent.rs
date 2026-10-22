@@ -46,6 +46,23 @@ pub enum Workspace {
     },
     /// Roda direto num diretório existente, sem isolamento.
     Directory { path: PathBuf },
+    /// Reabertura depois de um reinício do app: roda onde o agente estava (o
+    /// worktree dele, que continua sendo dele para a limpeza) e retoma a
+    /// conversa do CLI em vez de começar outra. Claude Code: `--resume <id do
+    /// agente>` (ele nasce com `--session-id <id do agente>`); Codex: `codex
+    /// resume --last` na pasta.
+    Restore {
+        path: PathBuf,
+        #[serde(default)]
+        worktree: Option<WorktreeInfo>,
+    },
+}
+
+impl Workspace {
+    /// Retoma uma conversa (reabertura), em vez de começar uma.
+    pub fn resumes(&self) -> bool {
+        matches!(self, Self::Restore { .. })
+    }
 }
 
 /// Tamanho do terminal. A UI é a dona do tamanho: redimensiona o próprio

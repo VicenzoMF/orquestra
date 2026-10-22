@@ -54,18 +54,32 @@ pub struct CommandSpec {
 }
 
 /// Traduz o pedido de spawn no comando de cada CLI:
-/// - Claude Code: `--mcp-config`, `--settings` (hooks de status),
-///   `--allowedTools mcp__orquestra` (orquestrador) e o prompt após `--`;
-/// - Codex: `-c mcp_servers.<nome>.*`, `-c notify=[…]`, notificações OSC 9 da
-///   TUI e o prompt após `--`;
+/// - Claude Code: `--session-id <id do agente>` (ou `--resume`, reabrindo),
+///   `--mcp-config`, `--settings` (hooks de status), `--allowedTools
+///   mcp__orquestra` (orquestrador) e o prompt após `--`;
+/// - Codex: `resume --last` (reabrindo), `-c mcp_servers.<nome>.*`, `-c
+///   notify=[…]`, notificações OSC 9 da TUI e o prompt após `--`;
 /// - Shell/Custom: só o ambiente; o prompt vai para o PTY seguido de `\r`.
+///
+/// Reabrindo (`Workspace::Restore`), a tarefa inicial não vai de novo: a
+/// conversa retomada já a tem.
 pub fn build_command(req: &SpawnRequest, workdir: &Path) -> CommandSpec {
     let config = &req.config;
-    let prompt = config.initial_prompt.as_deref().filter(|p| !p.is_empty());
-    let mut args = config.args.clone();
+    let resume = config.workspace.resumes();
+    let prompt = config
+        .initial_prompt
+        .as_deref()
+        .filter(|p| !p.is_empty() && !resume);
+    let mut args = Vec::new();
+    if resume && config.kind == AgentKind::Codex {
+        // Subcomando: antes dos argumentos do preset. A sessão mais recente
+        // da pasta (o Codex não deixa escolher o id ao criar).
+        args.extend(["resume".to_owned(), "--last".to_owned()]);
+    }
+    args.extend(config.args.iter().cloned());
     let mut startup_input = None;
     match config.kind {
-        AgentKind::ClaudeCode => args.extend(claude_args(req, prompt)),
+        AgentKind::ClaudeCode => args.extend(claude_args(req, prompt, resume)),
         AgentKind::Codex => args.extend(codex_args(req, prompt)),
         AgentKind::Shell | AgentKind::Custom => {
             startup_input = prompt.map(|p| format!("{p}\r").into_bytes());
@@ -103,8 +117,13 @@ fn agent_env(req: &SpawnRequest, workdir: &Path) -> BTreeMap<String, String> {
     vars
 }
 
-fn claude_args(req: &SpawnRequest, prompt: Option<&str>) -> Vec<String> {
-    let mut args = Vec::new();
+fn claude_args(req: &SpawnRequest, prompt: Option<&str>, resume: bool) -> Vec<String> {
+    // A conversa tem o id do agente: assim dá para retomá-la depois de um
+    // reinício sem guardar mais nada.
+    let mut args = vec![
+        if resume { "--resume" } else { "--session-id" }.to_owned(),
+        req.id.to_string(),
+    ];
     if !req.mcp_servers.is_empty() {
         args.push("--mcp-config".to_owned());
         args.push(claude_mcp_config(&req.mcp_servers));
@@ -480,11 +499,42 @@ mod tests {
     }
 
     #[test]
-    fn claude_without_mcp_or_prompt_has_only_settings() {
-        let spec = build_command(&request(AgentKind::ClaudeCode, "claude"), Path::new("/w"));
-        assert_eq!(spec.args.len(), 2);
-        assert_eq!(spec.args[0], "--settings");
+    fn claude_without_mcp_or_prompt_has_session_id_and_settings() {
+        let req = request(AgentKind::ClaudeCode, "claude");
+        let spec = build_command(&req, Path::new("/w"));
+        assert_eq!(spec.args.len(), 4);
+        assert_eq!(&spec.args[..2], ["--session-id", &req.id.to_string()]);
+        assert_eq!(spec.args[2], "--settings");
         assert!(!spec.args.iter().any(|a| a == "--"));
+    }
+
+    /// Reabrindo: a conversa é retomada pelo id do agente (Claude Code) ou a
+    /// mais recente da pasta (Codex), e a tarefa inicial não vai de novo.
+    #[test]
+    fn restore_resumes_the_conversation_without_the_first_task() {
+        let restore = Workspace::Restore {
+            path: PathBuf::from("/w"),
+            worktree: None,
+        };
+        let mut req = request(AgentKind::ClaudeCode, "claude");
+        req.config.args = vec!["--model".to_owned(), "opus".to_owned()];
+        req.config.initial_prompt = Some("faça o login".to_owned());
+        req.config.workspace = restore.clone();
+        let spec = build_command(&req, Path::new("/w"));
+        let id = req.id.to_string();
+        assert_eq!(&spec.args[..4], ["--model", "opus", "--resume", &id]);
+        assert!(!spec.args.iter().any(|a| a == "--session-id"));
+        assert!(!spec.args.iter().any(|a| a == "faça o login"));
+
+        req.config.kind = AgentKind::Codex;
+        req.config.program = "codex".to_owned();
+        let spec = build_command(&req, Path::new("/w"));
+        assert_eq!(&spec.args[..4], ["resume", "--last", "--model", "opus"]);
+        assert!(!spec.args.iter().any(|a| a == "faça o login"));
+
+        req.config.kind = AgentKind::Shell;
+        let spec = build_command(&req, Path::new("/w"));
+        assert_eq!(spec.startup_input, None);
     }
 
     #[test]

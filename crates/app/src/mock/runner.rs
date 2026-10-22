@@ -400,6 +400,7 @@ impl AgentRunner for MockRunner {
         let (workdir, worktree) = match &req.config.workspace {
             Workspace::Worktree { repo, .. } => worktree_for(repo, &req),
             Workspace::Directory { path } => (path.clone(), None),
+            Workspace::Restore { path, worktree } => (path.clone(), worktree.clone()),
         };
         let (tx, rx) = mpsc::unbounded_channel();
         let agent = Arc::new(Agent {
