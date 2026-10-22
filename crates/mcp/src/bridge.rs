@@ -65,12 +65,14 @@ impl OrquestraBridge {
     }
 
     #[tool(
-        description = "Cria um agente de código (Claude Code ou Codex) num git worktree e branch \
-        próprios do repositório da sessão, já com uma tarefa. Ele começa a trabalhar sozinho; \
-        acompanhe com wait_for e read_output. Escreva a tarefa completa e autocontida: o agente \
-        não vê esta conversa. Retorna nome, id e status inicial: starting; queued se o limite de \
-        agentes simultâneos foi atingido (sobe sozinho quando abrir vaga); awaiting_approval se \
-        a sessão exige que o humano aprove."
+        description = "Cria um agente (Claude Code ou Codex) já com uma tarefa. Ele trabalha num \
+        git worktree e branch próprios (workspace \"worktree\", o padrão numa pasta git) ou \
+        direto numa pasta (workspace \"pasta\"; dir escolhe outra pasta que não a da sessão). \
+        Ele começa a trabalhar sozinho; acompanhe com wait_for e read_output. Escreva a tarefa \
+        completa e autocontida: o agente não vê esta conversa. Retorna nome, id, pasta, \
+        workspace e status inicial: starting; queued se o limite de agentes simultâneos foi \
+        atingido (sobe sozinho quando abrir vaga); awaiting_approval se a sessão exige que o \
+        humano aprove."
     )]
     async fn spawn_agent(
         &self,
@@ -148,7 +150,8 @@ impl OrquestraBridge {
     orquestração. Fluxo típico: divida o objetivo em tarefas independentes; spawn_agent para \
     cada uma; wait_for(until=\"idle\") para saber quem parou; read_output para ver o resultado \
     ou a pergunta; send_input para responder ou dar a próxima instrução; kill_agent para \
-    encerrar. Cada agente trabalha num worktree e branch próprios."
+    encerrar. Cada agente trabalha num worktree e branch próprios (pastas git) ou direto \
+    numa pasta, conforme o spawn_agent."
 )]
 impl ServerHandler for OrquestraBridge {}
 

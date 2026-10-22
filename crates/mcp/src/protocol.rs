@@ -83,6 +83,17 @@ pub struct SpawnAgentParams {
     /// Dá ao agente um Chromium próprio, controlável por MCP. Padrão: o do preset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser: Option<bool>,
+    /// Onde o agente trabalha: "worktree" (um git worktree e uma branch só
+    /// dele: para mudar código sem atrapalhar os outros) ou "pasta" (direto
+    /// na pasta: para pesquisar, ler, organizar arquivos ou trabalhar fora de
+    /// um repositório; agentes na mesma pasta podem se atropelar). Padrão:
+    /// "worktree" se a pasta for um repositório git, senão "pasta".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Pasta de trabalho, se não for a da sessão: absoluta, "~/..." ou
+    /// relativa à pasta da sessão.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

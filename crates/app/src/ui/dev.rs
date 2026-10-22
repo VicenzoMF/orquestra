@@ -8,9 +8,9 @@
 //! - `ORQUESTRA_DEMO_FOCUS=prefixo`: foca a sessão cujo nome começa assim;
 //! - `ORQUESTRA_DEMO_MOVE=prefixo:x,y`: põe a moldura dessa sessão em (x, y)
 //!   e reenquadra;
-//! - `ORQUESTRA_DEMO_DIALOG=nova|nova-mais|avulso|config`: abre o rascunho
-//!   de orquestração no canvas (`nova-mais`: com todas as opções) ou um
-//!   diálogo;
+//! - `ORQUESTRA_DEMO_DIALOG=nova|nova-mais|agente|avulso|config`: abre o
+//!   rascunho de orquestração no canvas (`nova-mais`: com todas as opções;
+//!   `agente`: no modo agente, com todas as opções) ou um diálogo;
 //! - `ORQUESTRA_DEMO_MENU=1`: abre a lista "Orquestrações" (`meio`: abre
 //!   pouco antes do screenshot, para pegar a animação no meio);
 //! - `ORQUESTRA_DEMO_ZOOM=fator`: zoom do canvas (ex.: `1.4`).
@@ -106,7 +106,7 @@ impl DevHooks {
                 canvas.zoom_to(zoom);
             }
             match self.dialog.as_deref() {
-                Some(which @ ("nova" | "nova-mais")) => {
+                Some(which @ ("nova" | "nova-mais" | "agente")) => {
                     // O `--mock` não tem recentes: usa a pasta da primeira sessão.
                     let repo = cx
                         .config
@@ -119,7 +119,10 @@ impl DevHooks {
                         None => canvas.open_draft(cx.config),
                     }
                     if let Some(d) = canvas.draft_mut() {
-                        d.more = which == "nova-mais";
+                        d.more = which != "nova";
+                        if which == "agente" {
+                            d.kind = super::draft::DraftKind::Agent;
+                        }
                     }
                 }
                 Some("avulso") => dialogs.open_solo(cx, st),

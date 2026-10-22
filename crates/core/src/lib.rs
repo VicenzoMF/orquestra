@@ -17,6 +17,7 @@ mod config;
 pub mod conventions;
 mod error;
 mod event;
+pub mod folder;
 pub mod hub;
 mod ids;
 mod mcp;

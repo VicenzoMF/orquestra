@@ -1,5 +1,5 @@
 //! Painéis que flutuam sobre o canvas, fixos na tela: o botão
-//! "Orquestrações" (abre a lista, uma orquestração de cada vez), "Precisa de
+//! "Sessões" (abre a lista, uma sessão de cada vez), "Precisa de
 //! você" no canto de cima e os recursos, compactos, no de baixo.
 
 use egui::{
@@ -32,7 +32,7 @@ const STAGGER: f64 = 0.06;
 const APPEAR: f64 = 0.2;
 const ATTENTION_W: f32 = 340.0;
 
-/// A lista "Orquestrações": aberta ou não, e desde quando (para a animação).
+/// A lista "Sessões": aberta ou não, e desde quando (para a animação).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Menu {
     pub open: bool,
@@ -101,7 +101,7 @@ fn area(id: &str, pivot: Align2, pos: Pos2) -> Area {
         .constrain(false)
 }
 
-// --- Orquestrações ---------------------------------------------------------
+// --- Sessões --------------------------------------------------------------
 
 fn orchestrations(
     ctx: &egui::Context,
@@ -191,12 +191,12 @@ fn hint(ui: &mut Ui, text: &str) {
         });
 }
 
-/// Botão "≡ Orquestrações (n)". O ponto âmbar avisa que alguma pede você.
+/// Botão "≡ Sessões (n)". O badge âmbar avisa que alguma pede você.
 fn menu_button(ui: &mut Ui, open: bool, count: usize, alert: bool) -> Response {
     let font = FontId::proportional(13.0);
     let label = ui
         .painter()
-        .layout_no_wrap("Orquestrações".to_owned(), font, theme::TEXT);
+        .layout_no_wrap("Sessões".to_owned(), font, theme::TEXT);
     let badge =
         ui.painter()
             .layout_no_wrap(count.to_string(), FontId::proportional(11.5), theme::TEXT);
@@ -253,7 +253,7 @@ fn menu_button(ui: &mut Ui, open: bool, count: usize, alert: bool) -> Response {
         .on_hover_text(if open {
             "Fechar a lista"
         } else {
-            "Ver as orquestrações"
+            "Ver as sessões (orquestrações e agentes)"
         })
 }
 

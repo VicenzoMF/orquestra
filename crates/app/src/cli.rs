@@ -1,10 +1,10 @@
-//! Linha de comando do `orq`, como a do `code`: `orq .` abre o repositório
-//! da pasta atual na janela (a aberta, se houver).
+//! Linha de comando do `orq`, como a do `code`: `orq .` abre a pasta atual
+//! na janela (a aberta, se houver).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context as _, bail};
+use orquestra_core::folder;
 
 use crate::instance::OpenRequest;
 
@@ -13,9 +13,9 @@ pub const USAGE: &str = "uso: orq [pasta] [-g <objetivo>] [--foreground]
        orq mcp         ponte stdio do MCP `orquestra` (chamada pelo CLI do orquestrador)
        orq hook stop   hook Stop do orquestrador Claude Code
 
-  pasta               abre o repositório git dessa pasta (ex.: `orq .`): sem
-                      objetivo, no diálogo de nova orquestração; se o app já
-                      estiver aberto, nele
+  pasta               abre essa pasta (ex.: `orq .`; num repositório git, a
+                      raiz dele): sem objetivo, no rascunho do canvas; se o
+                      app já estiver aberto, nele
   -g, --goal          já começa a orquestração com esse objetivo (pasta: `.`)
   --foreground        não se desprende do terminal (logs aqui)
   --mock              serviços simulados: a UI sem agentes reais";
@@ -63,8 +63,8 @@ impl UiArgs {
         Ok(out)
     }
 
-    /// O pedido para a janela. Fora do `--mock`, a pasta vira a raiz do seu
-    /// repositório git (cada agente trabalha num worktree dele).
+    /// O pedido para a janela. Fora do `--mock`, uma pasta dentro de um
+    /// repositório git vira a raiz dele (onde os worktrees nascem).
     pub fn request(&self) -> anyhow::Result<OpenRequest> {
         let repo = match &self.folder {
             None => None,
@@ -73,7 +73,7 @@ impl UiArgs {
                     .canonicalize()
                     .with_context(|| folder.display().to_string())?,
             ),
-            Some(folder) => Some(repo_root(folder)?),
+            Some(folder) => Some(project_dir(folder)?),
         };
         Ok(OpenRequest {
             repo,
@@ -82,28 +82,16 @@ impl UiArgs {
     }
 }
 
-/// Raiz do repositório git que contém `folder`.
-pub fn repo_root(folder: &Path) -> anyhow::Result<PathBuf> {
-    let dir = folder
+/// A pasta a abrir: a raiz do repositório git que contém `dir`, ou a própria
+/// pasta, se ela não está num repositório.
+pub fn project_dir(dir: &Path) -> anyhow::Result<PathBuf> {
+    let dir = dir
         .canonicalize()
-        .with_context(|| folder.display().to_string())?;
+        .with_context(|| dir.display().to_string())?;
     if !dir.is_dir() {
         bail!("{} não é uma pasta", dir.display());
     }
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .context("rodar o git")?;
-    if !out.status.success() {
-        bail!(
-            "{} não está num repositório git (cada agente trabalha num worktree dele)",
-            dir.display()
-        );
-    }
-    let root = String::from_utf8(out.stdout).context("caminho do repositório")?;
-    Ok(PathBuf::from(root.trim_end_matches('\n')))
+    Ok(folder::git_root(&dir).unwrap_or(dir))
 }
 
 #[cfg(test)]
@@ -140,18 +128,18 @@ mod tests {
     }
 
     #[test]
-    fn folder_resolves_to_the_repo_root() {
+    fn folder_resolves_to_the_repo_root_or_itself() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("loja");
         std::fs::create_dir_all(repo.join("src/rotas")).unwrap();
-        let git = Command::new("git")
+        let git = std::process::Command::new("git")
             .args(["init", "-q"])
             .arg(&repo)
             .status()
             .unwrap();
         assert!(git.success());
         let root = repo.canonicalize().unwrap();
-        assert_eq!(repo_root(&repo.join("src/rotas")).unwrap(), root);
+        assert_eq!(project_dir(&repo.join("src/rotas")).unwrap(), root);
 
         let a = UiArgs {
             folder: Some(repo.join("src")),
@@ -162,10 +150,16 @@ mod tests {
         assert_eq!(request.repo, Some(root));
         assert_eq!(request.goal.as_deref(), Some("x"));
 
+        // Fora de um repositório, a própria pasta.
         let outside = tmp.path().join("solta");
         std::fs::create_dir(&outside).unwrap();
-        let err = repo_root(&outside).unwrap_err().to_string();
-        assert!(err.contains("não está num repositório git"), "{err}");
-        assert!(repo_root(&tmp.path().join("nada")).is_err());
+        assert_eq!(
+            project_dir(&outside).unwrap(),
+            outside.canonicalize().unwrap()
+        );
+        assert!(project_dir(&tmp.path().join("nada")).is_err());
+        let file = outside.join("a.txt");
+        std::fs::write(&file, "").unwrap();
+        assert!(project_dir(&file).is_err());
     }
 }

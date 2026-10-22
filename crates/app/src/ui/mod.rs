@@ -513,7 +513,7 @@ mod tests {
     use std::time::Duration;
 
     use egui::{Event, PointerButton, Pos2, RawInput, Rect, pos2, vec2};
-    use orquestra_core::AppConfig;
+    use orquestra_core::{AppConfig, Workspace};
 
     use super::*;
     use crate::backend::{self, Backend};
@@ -761,6 +761,59 @@ mod tests {
         shutdown(&runtime, &cmd, hub);
     }
 
+    /// "+ Novo agente": um agente sozinho numa pasta qualquer (aqui, sem
+    /// git), numa sessão só dele, trabalhando direto nela; sem tarefa, ele só
+    /// abre, esperando você.
+    #[test]
+    fn agent_draft_opens_an_agent_in_any_folder() {
+        let runtime = runtime();
+        let (ctx, mut app, shared, cmd, hub) = mock_app(&runtime, false);
+        let notes = tempfile::tempdir().unwrap();
+        frame(&ctx, &mut app);
+
+        app.canvas.open_agent_draft(&app.config);
+        app.canvas.draft_mut().unwrap().set_repo(notes.path());
+        frame(&ctx, &mut app);
+        let draft = app.canvas.draft().unwrap();
+        assert_eq!(draft.kind, draft::DraftKind::Agent);
+        assert!(draft.agent(&app.config).is_ok(), "a tarefa é opcional");
+        key(&ctx, &mut app, Key::Enter, Modifiers::NONE);
+        assert!(app.canvas.draft().is_none(), "Enter não iniciou");
+        wait_sessions(&ctx, &mut app, &shared, 1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while shared.model().agent_count() < 1 {
+            assert!(std::time::Instant::now() < deadline, "agente não chegou");
+            frame(&ctx, &mut app);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        {
+            let model = shared.model();
+            let session = &model.sessions()[0];
+            assert_eq!(session.orchestrator, None);
+            assert_eq!(session.config.repo, notes.path());
+            let agents = model.agents_of(session.id);
+            assert_eq!(agents.len(), 1);
+            let agent = agents[0];
+            assert_eq!(agent.config.parent, None);
+            assert_eq!(agent.config.initial_prompt, None);
+            assert_eq!(
+                agent.config.workspace,
+                Workspace::Directory {
+                    path: notes.path().to_owned()
+                }
+            );
+            assert_eq!(app.st.selected, Some(agent.id));
+        }
+        // O modo fica no rascunho até trocar: "+ Nova orquestração" volta.
+        app.canvas.open_draft(&app.config);
+        assert_eq!(
+            app.canvas.draft().unwrap().kind,
+            draft::DraftKind::Orchestration
+        );
+
+        shutdown(&runtime, &cmd, hub);
+    }
+
     /// Botão direito no fundo do canvas: menu com "Iniciar novo agente
     /// orquestrador", que abre o rascunho onde foi o clique.
     #[test]
@@ -798,10 +851,7 @@ mod tests {
         // O cursor já está no objetivo.
         type_text(&ctx, &mut app, "login");
         let draft = app.canvas.draft().unwrap();
-        assert_eq!(
-            draft.session(&app.config).err(),
-            Some("Falta a pasta do repositório")
-        );
+        assert_eq!(draft.session(&app.config).err(), Some("Falta a pasta"));
 
         shutdown(&runtime, &cmd, hub);
     }

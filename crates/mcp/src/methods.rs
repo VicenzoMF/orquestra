@@ -6,9 +6,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use std::path::Path;
+
 use orquestra_core::{
     AgentId, AgentKind, AgentPreset, AgentStatus, Command, QueueReason, SessionConfig, TermSize,
-    Workspace,
+    Workspace, folder,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -21,6 +23,57 @@ use crate::protocol::{
     status_detail,
 };
 use crate::state::{Grant, State, WaitSpec};
+
+const CLOSED: &str = "a sessão desta orquestração foi encerrada";
+
+/// Onde um agente novo trabalha: `dir` (ou a pasta da sessão) e `mode`
+/// ("worktree" ou "pasta"; padrão: worktree se a pasta for git).
+async fn choose_workspace(
+    session_dir: &Path,
+    dir: Option<&str>,
+    mode: Option<&str>,
+) -> Result<Workspace, String> {
+    let path = dir.map_or_else(
+        || session_dir.to_owned(),
+        |d| folder::resolve(d, session_dir),
+    );
+    let probe = path.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        let path = probe.canonicalize().ok().filter(|p| p.is_dir())?;
+        let git = folder::git_root(&path);
+        Some((path, git))
+    })
+    .await
+    .map_err(|err| err.to_string())?;
+    let Some((path, git)) = found else {
+        return Err(format!("a pasta não existe: {}", path.display()));
+    };
+    let isolate = match mode.map(str::trim) {
+        None | Some("") => git.is_some(),
+        Some("worktree") if git.is_none() => {
+            return Err(format!(
+                "{} não é um repositório git: use workspace \"pasta\"",
+                path.display()
+            ));
+        }
+        Some("worktree") => true,
+        Some("pasta" | "folder" | "dir") => false,
+        Some(other) => {
+            return Err(format!(
+                "workspace inválido: {other} (use \"worktree\" ou \"pasta\")"
+            ));
+        }
+    };
+    Ok(if isolate {
+        Workspace::Worktree {
+            repo: path,
+            base: None,
+            branch: None,
+        }
+    } else {
+        Workspace::Directory { path }
+    })
+}
 
 /// Quanto o `spawn_agent` espera o hub responder com o primeiro status.
 const SPAWN_ACK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -79,6 +132,21 @@ impl Shared {
         let base = normalize_name(&p.name)
             .ok_or("nome inválido: use letras, números, '-' ou '_'".to_owned())?;
         let presets = self.config().presets;
+        let session_dir = self
+            .lock()
+            .sessions
+            .get(&grant.session)
+            .map(|s| s.repo.clone())
+            .ok_or(CLOSED.to_owned())?;
+        // O git roda fora da trava.
+        let workspace =
+            choose_workspace(&session_dir, p.dir.as_deref(), p.workspace.as_deref()).await?;
+        let (dir, mode) = match &workspace {
+            Workspace::Worktree { repo, .. } => (repo.clone(), "worktree"),
+            Workspace::Directory { path } | Workspace::Restore { path, .. } => {
+                (path.clone(), "pasta")
+            }
+        };
 
         let (id, name, config, ack) = {
             let mut st = self.lock();
@@ -86,7 +154,7 @@ impl Shared {
                 .sessions
                 .get(&grant.session)
                 .cloned()
-                .ok_or("a sessão desta orquestração foi encerrada".to_owned())?;
+                .ok_or(CLOSED.to_owned())?;
             let preset = choose_preset(&session, &presets, p.kind.as_deref())?;
             let browser = match p.browser {
                 Some(true) if !session.workers_may_browse => {
@@ -96,11 +164,6 @@ impl Shared {
                 None => preset.browser && session.workers_may_browse,
             };
             let name = st.unique_name(grant.session, &base);
-            let workspace = Workspace::Worktree {
-                repo: session.repo.clone(),
-                base: None,
-                branch: None,
-            };
             let mut config =
                 preset.to_config(name.clone(), grant.session, workspace, TermSize::default());
             config.parent = Some(grant.orchestrator);
@@ -145,6 +208,8 @@ impl Shared {
             json!({
                 "agent": name,
                 "id": id.short(),
+                "dir": dir,
+                "workspace": mode,
                 "status": status_code(&status),
                 "detail": status_detail(&status),
             }),

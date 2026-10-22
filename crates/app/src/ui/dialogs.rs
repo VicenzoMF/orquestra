@@ -1,8 +1,10 @@
 //! Diálogos: agente avulso, configurações e confirmações. A nova
 //! orquestração é um rascunho no canvas (`draft.rs`).
 
+use std::path::PathBuf;
+
 use egui::{ComboBox, DragValue, Id, Modal, RichText, TextEdit, Ui};
-use orquestra_core::{AgentId, AppConfig, Command, SessionId, WorktreeCleanup};
+use orquestra_core::{AgentId, AppConfig, Command, SessionId, WorktreeCleanup, folder};
 
 use super::widgets;
 use super::{Action, Ctx, UiState};
@@ -15,6 +17,10 @@ pub struct SoloAgent {
     name: String,
     task: String,
     browser: bool,
+    /// Num worktree próprio (só numa pasta git).
+    isolate: bool,
+    /// Pasta da sessão escolhida e se ela é git (o git roda só quando ela muda).
+    git: Option<(PathBuf, bool)>,
 }
 
 pub struct Settings {
@@ -80,6 +86,8 @@ impl Dialogs {
             name: format!("agente-{n}"),
             task: String::new(),
             browser: preset.is_some_and(|p| p.browser),
+            isolate: false,
+            git: None,
         });
     }
 
@@ -186,12 +194,31 @@ fn solo_agent(ui: &mut Ui, cx: &Ctx, st: &mut UiState, d: &mut SoloAgent, close:
             .desired_width(f32::INFINITY),
     );
     ui.checkbox(&mut d.browser, "Dar um navegador a este agente");
-    ui.label(
-        RichText::new("Roda num git worktree novo do repositório da orquestração.")
-            .size(12.0)
-            .color(theme::TEXT_DIM),
-    );
     let session = d.session.and_then(|s| cx.model.session(s));
+    if let Some(folder) = session.map(|s| &s.config.repo)
+        && d.git.as_ref().is_none_or(|(f, _)| f != folder)
+    {
+        let git = folder::git_root(folder).is_some();
+        d.git = Some((folder.clone(), git));
+        // Numa pasta git, o padrão é não mexer na cópia dos outros.
+        d.isolate = git;
+    }
+    let git = d.git.as_ref().is_some_and(|(_, git)| *git);
+    ui.add_enabled(
+        git,
+        egui::Checkbox::new(&mut d.isolate, "Num git worktree e branch próprios"),
+    )
+    .on_disabled_hover_text("A pasta da sessão não é um repositório git");
+    let isolate = d.isolate && git;
+    ui.label(
+        RichText::new(if isolate {
+            "Trabalha numa cópia isolada da pasta da sessão, sem atrapalhar os outros."
+        } else {
+            "Trabalha direto na pasta da sessão."
+        })
+        .size(12.0)
+        .color(theme::TEXT_DIM),
+    );
     let valid = session.is_some() && preset.is_some() && !d.name.trim().is_empty();
     ui.add_space(10.0);
     ui.horizontal(|ui| {
@@ -207,6 +234,7 @@ fn solo_agent(ui: &mut Ui, cx: &Ctx, st: &mut UiState, d: &mut SoloAgent, close:
                 d.name.trim().to_owned(),
                 Some(d.task.clone()),
                 d.browser,
+                isolate,
                 st.spawn_size(),
             );
             cx.send(cmd);

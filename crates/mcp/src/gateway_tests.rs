@@ -60,6 +60,8 @@ struct Harness {
     orq: AgentId,
     token: String,
     socket: PathBuf,
+    /// Pasta da sessão: um repositório git de verdade, numa pasta temporária.
+    repo: PathBuf,
     _dir: TempDir,
 }
 
@@ -68,9 +70,18 @@ impl Harness {
         Self::with_session(SessionConfig::new("loja", "/src/loja", "login com e-mail")).await
     }
 
-    async fn with_session(session_config: SessionConfig) -> Self {
+    async fn with_session(mut session_config: SessionConfig) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("gw.sock");
+        let repo = dir.path().join("loja");
+        std::fs::create_dir(&repo).unwrap();
+        let git = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&repo)
+            .status()
+            .unwrap();
+        assert!(git.success());
+        session_config.repo = repo.clone();
         let bus = EventBus::new();
         let (tx, rx) = command_channel();
         let gw = McpGateway::start_at(tx, bus.clone(), AppConfig::default(), &socket).unwrap();
@@ -107,6 +118,7 @@ impl Harness {
             orq,
             token,
             socket,
+            repo,
             _dir: dir,
         };
         h.eventually(|st| st.agents.contains_key(&orq) && st.sessions.contains_key(&session))
@@ -352,6 +364,9 @@ async fn spawn_agent_builds_the_worker_config() {
         .unwrap();
     assert_eq!(reply["agent"], "api-login");
     assert_eq!(reply["status"], "starting");
+    assert_eq!(reply["workspace"], "worktree", "pasta git: worktree");
+    let repo = h.repo.canonicalize().unwrap();
+    assert_eq!(reply["dir"], repo.to_str().unwrap());
 
     let configs = h.spawned_configs();
     let cfg = &configs[0];
@@ -364,7 +379,7 @@ async fn spawn_agent_builds_the_worker_config() {
     assert_eq!(
         cfg.workspace,
         Workspace::Worktree {
-            repo: "/src/loja".into(),
+            repo,
             base: None,
             branch: None
         }
@@ -384,6 +399,55 @@ async fn spawn_agent_builds_the_worker_config() {
     let configs = h.spawned_configs();
     assert_eq!(configs[1].kind, AgentKind::ClaudeCode);
     assert!(!configs[1].browser, "o preset padrão não pede navegador");
+}
+
+/// Onde o agente trabalha é escolha de cada spawn: worktree numa pasta git
+/// (o padrão), direto na pasta (para pesquisar, ou fora de um repositório),
+/// e em qualquer pasta da máquina com `dir`.
+#[tokio::test]
+async fn spawn_agent_chooses_where_each_agent_works() {
+    let h = Harness::new().await;
+    let loose = h.repo.parent().unwrap().join("notas");
+    std::fs::create_dir(&loose).unwrap();
+    let spawn = |params: Value| h.call(method::SPAWN_AGENT, params);
+
+    let reply = spawn(json!({"name": "busca", "task": "t", "workspace": "pasta"}))
+        .await
+        .unwrap();
+    assert_eq!(reply["workspace"], "pasta");
+    // `dir` relativo parte da pasta da sessão; fora de um repositório, o
+    // padrão é trabalhar direto na pasta.
+    let reply = spawn(json!({"name": "notas", "task": "t", "dir": "../notas"}))
+        .await
+        .unwrap();
+    assert_eq!(reply["workspace"], "pasta");
+    let configs = h.spawned_configs();
+    assert_eq!(
+        configs[0].workspace,
+        Workspace::Directory {
+            path: h.repo.canonicalize().unwrap()
+        }
+    );
+    assert_eq!(
+        configs[1].workspace,
+        Workspace::Directory {
+            path: loose.canonicalize().unwrap()
+        }
+    );
+
+    let err = spawn(json!({"name": "x", "task": "t", "dir": loose, "workspace": "worktree"}))
+        .await
+        .unwrap_err();
+    assert!(err.contains("não é um repositório git"), "{err}");
+    let err = spawn(json!({"name": "x", "task": "t", "dir": "/nao/existe"}))
+        .await
+        .unwrap_err();
+    assert!(err.contains("a pasta não existe"), "{err}");
+    let err = spawn(json!({"name": "x", "task": "t", "workspace": "nuvem"}))
+        .await
+        .unwrap_err();
+    assert!(err.contains("workspace inválido"), "{err}");
+    assert_eq!(h.spawned_configs().len(), 2);
 }
 
 #[tokio::test]

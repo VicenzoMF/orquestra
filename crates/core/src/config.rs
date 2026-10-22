@@ -167,6 +167,14 @@ impl Default for OrchestrationConfig {
 }
 
 impl OrchestrationConfig {
+    /// Prompt ainda igual a um padrão antigo (gravado por extenso no
+    /// `config.toml`) vira o padrão atual; um prompt editado fica.
+    pub fn upgrade(&mut self) {
+        if PREVIOUS_ORCHESTRATOR_PROMPTS.contains(&self.orchestrator_prompt.as_str()) {
+            self.orchestrator_prompt = DEFAULT_ORCHESTRATOR_PROMPT.to_owned();
+        }
+    }
+
     pub fn render_prompt(&self, session: &SessionConfig) -> String {
         self.orchestrator_prompt
             .replace("{goal}", &session.goal)
@@ -178,11 +186,27 @@ impl OrchestrationConfig {
 const DEFAULT_ORCHESTRATOR_PROMPT: &str = "\
 Você é o orquestrador da sessão \"{name}\" do orquestra. Objetivo: {goal}
 
+Você coordena; delegue o trabalho aos agentes em vez de fazê-lo. Pelo MCP \
+`orquestra` você cria e acompanha agentes: spawn_agent, list_agents, send_input, \
+read_output, wait_for e kill_agent. A pasta da sessão é {repo}. Para cada \
+agente, escolha onde ele trabalha: num git worktree e branch próprios \
+(workspace \"worktree\", o padrão numa pasta git) quando vai mudar código, ou \
+direto numa pasta (workspace \"pasta\", e dir para outra pasta da máquina) \
+para pesquisar, ler, organizar arquivos ou trabalhar fora de um repositório; \
+agentes na mesma pasta podem se atropelar, então dê a cada um arquivos \
+diferentes. Divida o objetivo em tarefas independentes, uma por agente, \
+acompanhe com wait_for e read_output, responda quando um agente travar e, no \
+fim, resuma o que cada um entregou.";
+
+/// Padrões anteriores, para `OrchestrationConfig::upgrade`.
+const PREVIOUS_ORCHESTRATOR_PROMPTS: &[&str] = &["\
+Você é o orquestrador da sessão \"{name}\" do orquestra. Objetivo: {goal}
+
 Você coordena; não edite código. Pelo MCP `orquestra` você cria e acompanha \
 agentes, cada um num git worktree próprio de {repo}: spawn_agent, list_agents, \
 send_input, read_output, wait_for e kill_agent. Divida o objetivo em tarefas \
 independentes, uma por agente, acompanhe com wait_for e read_output, responda \
-quando um agente travar e, no fim, resuma o que cada branch entrega.";
+quando um agente travar e, no fim, resuma o que cada branch entrega."];
 
 /// Modelo de agente oferecido na UI e usado pelo `spawn_agent` do MCP.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +290,28 @@ mod tests {
             UiConfig::default().scrollback_lines
         );
         assert_eq!(cfg.presets, AgentPreset::defaults());
+    }
+
+    /// Quem nunca mexeu no prompt (o `config.toml` o grava por extenso)
+    /// ganha o padrão novo; quem editou, fica com o seu.
+    #[test]
+    fn old_default_prompt_upgrades_but_edited_stays() {
+        let mut cfg = AppConfig::default();
+        cfg.orchestration.orchestrator_prompt = PREVIOUS_ORCHESTRATOR_PROMPTS[0].to_owned();
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let mut back: AppConfig = toml::from_str(&text).unwrap();
+        back.orchestration.upgrade();
+        assert_eq!(
+            back.orchestration.orchestrator_prompt,
+            DEFAULT_ORCHESTRATOR_PROMPT
+        );
+
+        let mut edited = OrchestrationConfig {
+            orchestrator_prompt: "Seja breve. {goal}".to_owned(),
+            ..OrchestrationConfig::default()
+        };
+        edited.upgrade();
+        assert_eq!(edited.orchestrator_prompt, "Seja breve. {goal}");
     }
 
     #[test]

@@ -20,7 +20,7 @@ use egui::{
 };
 use orquestra_core::{AgentStatus, AppConfig, Command, QueueReason, SessionId};
 
-use super::draft::{self, Draft};
+use super::draft::{self, Draft, DraftKind};
 use super::overlay::{self, INSET_BOTTOM, INSET_TOP};
 use super::widgets::{self, kind_label, paint_elided};
 use super::{Action, Ctx, Resources, UiState};
@@ -94,6 +94,7 @@ enum Placement {
 /// Itens do menu do botão direito no fundo do canvas.
 enum MenuChoice {
     NewOrchestrator,
+    NewAgent,
 }
 
 impl Default for CanvasState {
@@ -160,24 +161,42 @@ impl CanvasState {
     /// Abre o rascunho no centro da área visível; se já há um, traz ele para
     /// lá com o texto.
     pub fn open_draft(&mut self, config: &AppConfig) {
-        self.open_draft_with(config, None, Placement::Center);
+        self.open_draft_with(
+            config,
+            None,
+            Some(DraftKind::Orchestration),
+            Placement::Center,
+        );
+    }
+
+    /// Rascunho de um agente sozinho numa pasta ("+ Novo agente").
+    pub fn open_agent_draft(&mut self, config: &AppConfig) {
+        self.open_draft_with(config, None, Some(DraftKind::Agent), Placement::Center);
     }
 
     /// Rascunho já com esta pasta (`orq <pasta>`): falta só o objetivo.
     pub fn open_draft_in(&mut self, config: &AppConfig, repo: &Path) {
-        self.open_draft_with(config, Some(repo), Placement::Center);
+        self.open_draft_with(config, Some(repo), None, Placement::Center);
     }
 
-    fn open_draft_with(&mut self, config: &AppConfig, repo: Option<&Path>, place: Placement) {
-        match self.draft.as_mut() {
-            Some(d) => {
-                if let Some(repo) = repo {
-                    d.set_repo(repo);
-                }
-                d.focus_goal();
-            }
-            None => self.draft = Some(Draft::new(config, repo, self.auto_fit)),
+    /// `kind: None` mantém o modo do rascunho aberto (ou orquestração).
+    fn open_draft_with(
+        &mut self,
+        config: &AppConfig,
+        repo: Option<&Path>,
+        kind: Option<DraftKind>,
+        place: Placement,
+    ) {
+        let draft = self
+            .draft
+            .get_or_insert_with(|| Draft::new(config, repo, self.auto_fit));
+        if let Some(repo) = repo {
+            draft.set_repo(repo);
         }
+        if let Some(kind) = kind {
+            draft.kind = kind;
+        }
+        draft.focus_goal();
         self.place_draft = Some(place);
         // A vista não pula enquanto a pessoa digita.
         self.auto_fit = false;
@@ -486,7 +505,16 @@ pub fn show(
         match choice {
             MenuChoice::NewOrchestrator => {
                 let at = cs.menu_at;
-                cs.open_draft_with(cx.config, None, Placement::At(at));
+                cs.open_draft_with(
+                    cx.config,
+                    None,
+                    Some(DraftKind::Orchestration),
+                    Placement::At(at),
+                );
+            }
+            MenuChoice::NewAgent => {
+                let at = cs.menu_at;
+                cs.open_draft_with(cx.config, None, Some(DraftKind::Agent), Placement::At(at));
             }
         }
     }
@@ -514,6 +542,13 @@ fn background_menu(ui: &mut Ui) -> Option<MenuChoice> {
     let mut choice = None;
     if ui.button("Iniciar novo agente orquestrador").clicked() {
         choice = Some(MenuChoice::NewOrchestrator);
+    }
+    if ui
+        .button("Iniciar novo agente")
+        .on_hover_text("Um agente só, numa pasta qualquer")
+        .clicked()
+    {
+        choice = Some(MenuChoice::NewAgent);
     }
     choice
 }
@@ -604,8 +639,9 @@ fn toolbar(
                 ui.separator();
                 let has_sessions = !cx.model.sessions().is_empty();
                 let solo = ui
-                    .add_enabled(has_sessions, egui::Button::new("+ Agente avulso"))
-                    .on_disabled_hover_text("Crie uma orquestração primeiro");
+                    .add_enabled(has_sessions, egui::Button::new("+ Agente na sessão"))
+                    .on_hover_text("Mais um agente numa sessão aberta, sem o orquestrador")
+                    .on_disabled_hover_text("Abra uma sessão primeiro");
                 if solo.clicked() {
                     dialogs.open_solo(cx, st);
                 }
@@ -691,21 +727,21 @@ fn draw(
         painter.text(
             c - vec2(0.0, 22.0),
             Align2::CENTER_CENTER,
-            "Nenhuma orquestração ainda",
+            "Nada aberto ainda",
             FontId::proportional(20.0),
             theme::TEXT,
         );
         painter.text(
             c + vec2(0.0, 8.0),
             Align2::CENTER_CENTER,
-            "Clique com o botão direito para iniciar um orquestrador",
+            "Clique com o botão direito para iniciar um agente ou um orquestrador",
             FontId::proportional(14.0),
             theme::TEXT_DIM,
         );
         painter.text(
             c + vec2(0.0, 30.0),
             Align2::CENTER_CENTER,
-            "ou use Ctrl+Shift+N",
+            "ou use “+ Novo agente” e “+ Nova orquestração” (Ctrl+Shift+N)",
             FontId::proportional(12.5),
             theme::TEXT_DIM,
         );

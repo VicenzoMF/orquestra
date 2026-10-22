@@ -71,6 +71,13 @@ pub fn top_bar(
             {
                 canvas.open_draft(cx.config);
             }
+            if ui
+                .button("+ Novo agente")
+                .on_hover_text("Um agente só, numa pasta qualquer, como uma conversa")
+                .clicked()
+            {
+                canvas.open_agent_draft(cx.config);
+            }
         });
     });
 }
@@ -84,7 +91,7 @@ pub fn status_bar(ui: &mut Ui, cx: &Ctx) {
     ui.horizontal(|ui| {
         let small = |text: String, color: Color32| RichText::new(text).size(12.0).color(color);
         ui.label(small(
-            plural(sessions, "orquestração", "orquestrações"),
+            plural(sessions, "sessão", "sessões"),
             theme::TEXT_DIM,
         ));
         ui.label(small("·".to_owned(), theme::TEXT_DIM));
