@@ -400,7 +400,21 @@ os agentes, visíveis ou não, então sempre responde.
       setas a partir da destacada + Enter (é o caso do aviso de confiança na
       pasta);
     - pergunta de uma linha terminada em `(s/n)` ou `[Y/n]`.
-  - Layout automático em árvore, sem persistência no MVP.
+  - Cada moldura fica onde a pessoa a pôs. As posições ficam só no app
+    (`CanvasState`): as sessões não sobrevivem a um reinício, então nada vai
+    para o store. A posição some quando a sessão sai do modelo.
+    - "Iniciar" põe o canto da moldura onde estava o rascunho. Sessão sem
+      posição (`orq <pasta> -g`, mocks) ganha uma na primeira vez que
+      aparece: x = 0, logo abaixo da moldura mais baixa. Daí em diante fica
+      fixa como as outras.
+    - Arrastar o cabeçalho move a sessão inteira, sem pan do canvas; clique
+      simples nele foca, como antes. Arrastar o título do rascunho move o
+      rascunho.
+  - `layout.rs` é uma função pura: recebe a origem de cada sessão e monta a
+    árvore dentro da moldura. Molduras nunca se sobrepõem: a que cruza outra
+    mais acima (faixas de x se cruzando, a menos de `SESSION_GAP` na
+    vertical) desce só na exibição, sem mudar a posição guardada, e volta
+    quando a de cima encolhe.
   - Botão direito no fundo (também dentro de uma moldura, fora dos cards)
     abre um menu; por enquanto, só "Iniciar novo agente orquestrador".
   - **Rascunho de orquestração** (`ui/draft.rs`): uma janela no estilo dos
@@ -416,8 +430,9 @@ os agentes, visíveis ou não, então sempre responde.
       recente, ele já abre assim.
     - Sem ComboBox lá dentro: o popup sai no lugar certo, mas em escala 1:1,
       e destoa da janela com zoom. Preset e recentes são escolhas inline.
-    - "Iniciar" manda `CreateSession` + `Spawn`, seleciona o orquestrador,
-      põe a pasta nos recentes e reenquadra o canvas.
+    - "Iniciar" manda `CreateSession` + `Spawn`, guarda a posição da sessão
+      nova (o `SessionId` vem de `actions::new_orchestration`), seleciona o
+      orquestrador, põe a pasta nos recentes e reenquadra o canvas.
 - **Topo.** Pills de sessão (Todas / cada sessão, com resumo) e
   "+ Nova orquestração" (abre o rascunho no canvas).
 - **Painel lateral.** Com um nó selecionado, mostra o terminal completo ou o
