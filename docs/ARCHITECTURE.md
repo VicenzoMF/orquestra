@@ -151,7 +151,8 @@ pub struct Notification { agent, kind: NeedsInput|NeedsApproval|Finished|Failed,
 
 `core::conventions` reúne o que cruza processos:
 - variáveis de ambiente: `ORQUESTRA_AGENT_ID`, `_SESSION_ID`, `_CDP_URL`,
-  `_CDP_PORT`, `_SOCKET`, `_TOKEN`;
+  `_CDP_PORT`, `_SOCKET`, `_TOKEN` e `_TTY` (o PTY do agente, onde os hooks
+  escrevem);
 - as OSC de status (`ESC]777;orquestra;waiting|running BEL`);
 - o nome do servidor MCP (`orquestra`).
 
@@ -263,7 +264,7 @@ nome, o id e o status.
   novidades dos filhos (terminou, falhou, pede input, pede aprovação).
   - Com novidade, responde `{"decision":"block","reason":"…"}` e o Claude
     continua já sabendo.
-  - Sem novidade, escreve a OSC `waiting` no TTY e deixa parar.
+  - Sem novidade, escreve a OSC `waiting` no PTY do agente e deixa parar.
 
   Para Codex (sem hook equivalente) vale só o modo puxado.
 
@@ -303,11 +304,14 @@ os agentes, visíveis ou não, então sempre responde.
   tipos, escrito no PTY.
 - **Status, em camadas.**
   1. Saída do processo: `Done`/`Failed`. É autoritativa.
-  2. OSC de `conventions::osc`, escritas por hooks injetados. No Claude Code,
-     via `--settings` com hooks:
+  2. OSC de `conventions::osc`, escritas por hooks injetados no PTY do
+     agente, cujo caminho vai em `ORQUESTRA_TTY`. O Claude Code roda os hooks
+     numa sessão nova, sem terminal de controle, então `/dev/tty` não serve
+     (fica só como reserva). No Claude Code, via `--settings` com hooks:
      - `Stop` e `Notification` → `waiting`; o `Stop` usa o `stop_hook` quando
-       houver;
-     - `UserPromptSubmit` → `running`.
+       houver. Num pedido de permissão, o `Notification` chega uns 6 s depois
+       de o menu aparecer;
+     - `UserPromptSubmit` e `PostToolUse` → `running`.
      No Codex, via `-c notify=[…]` → `waiting`. BEL e OSC 9 também contam.
   3. Heurística: sem saída há `idle_ms` + padrões por tipo.
   4. Debounce.
@@ -363,7 +367,7 @@ os agentes, visíveis ou não, então sempre responde.
   repassadas ao socket.
 - **Hook** (`orquestra hook stop`). Lê o JSON do hook (respeita
   `stop_hook_active`) e devolve `decision: block` com as novidades, ou escreve
-  a OSC `waiting` em `/dev/tty`.
+  a OSC `waiting` no PTY do agente (`ORQUESTRA_TTY`).
 
 ### app
 - **Canvas.** `egui::Scene` (pan/zoom).
@@ -373,6 +377,15 @@ os agentes, visíveis ou não, então sempre responde.
   - Card compacto (status + última linha) ou detalhado (fim do terminal,
     miniatura do navegador, aprovar/recusar, responder Sim/Não), conforme o
     zoom e o foco.
+  - A prévia vem de `term::preview`, sobre a tela do terminal. Ela ignora a
+    caixa de entrada do Claude Code e tudo abaixo dela (statusline, modo de
+    permissão), além do spinner. Sim/Não só aparecem se o agente aguarda e
+    a tela pergunta:
+    - menu com uma opção "Yes…" e uma "No…": responde pelo atalho da opção,
+      como `(y)` ou `(esc)`, ou pelo número dela; sem nenhum dos dois, usa
+      setas a partir da destacada + Enter (é o caso do aviso de confiança na
+      pasta);
+    - pergunta de uma linha terminada em `(s/n)` ou `[Y/n]`.
   - Layout automático em árvore, sem persistência no MVP.
 - **Topo.** Pills de sessão (Todas / cada sessão, com resumo) e
   "+ Nova orquestração".
@@ -442,7 +455,8 @@ execuções:
 
 - **Confiança no Claude Code.** Num repositório em que você nunca rodou o
   Claude Code, o orquestrador para no aviso "trust this folder". A opção
-  já selecionada é "No, exit". Confirme uma vez no terminal dele. O Claude
+  já selecionada é "No, exit". Confirme uma vez: pelo "Sim" do card, que
+  navega até "Yes", ou no terminal dele. O Claude
   Code guarda a confiança pela raiz do repositório principal, e os worktrees
   usam essa mesma raiz: os agentes criados depois não perguntam de novo.
 - **Codex.** O socket e o token vão também no `env` do servidor MCP, porque o

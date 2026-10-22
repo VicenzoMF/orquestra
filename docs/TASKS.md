@@ -33,9 +33,16 @@ Worktrees em `../orquestra-worktrees/<crate>`, branches `phase1/<crate>`.
       próprios; `c` usou Playwright MCP no próprio Chromium e a UI mostrou a página ao vivo
 - [x] Medido: primeiro quadro 44 ms; RSS 78,5 MB (28 MB privados, ~37 MB do driver Mesa)
 
+## Depois da Fase 2
+- [x] Sim/Não só quando a tela pergunta (permissão, confiança na pasta, `(s/n)`),
+      com as teclas tiradas da própria tela; agente que só terminou o turno
+      fica com "Abrir terminal"
+- [x] Prévia do card sem a caixa de entrada, a statusline e o spinner do Claude Code
+- [x] Hooks de status chegam ao runner: escrevem em `ORQUESTRA_TTY`, porque o
+      Claude Code roda hooks sem `/dev/tty` (antes o status vinha só da
+      heurística de silêncio)
+
 ## Próximos passos sugeridos
-- [ ] Sim/Não nos cards só em pedido de permissão (hoje aparece em qualquer agente ocioso)
-- [ ] Prévia do card ignorar a barra de status/caixa de prompt do Claude Code
 - [ ] Evento `Resized` no core para o gateway acompanhar o tamanho do terminal
 - [ ] Gateway receber a config salva (presets) sem reiniciar
 - [ ] Testar com Codex real; tela de histórico (`LoadHistory`)
