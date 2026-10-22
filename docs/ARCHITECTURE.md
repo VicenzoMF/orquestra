@@ -432,7 +432,9 @@ os agentes, visíveis ou não, então sempre responde.
       e destoa da janela com zoom. Preset e recentes são escolhas inline.
     - "Iniciar" manda `CreateSession` + `Spawn`, guarda a posição da sessão
       nova (o `SessionId` vem de `actions::new_orchestration`), seleciona o
-      orquestrador, põe a pasta nos recentes e reenquadra o canvas.
+      orquestrador e põe a pasta nos recentes. A vista não se mexe e o
+      ajuste automático segue desligado: a orquestração aparece onde a janela
+      estava.
 - **Topo.** Pills de sessão (Todas / cada sessão, com resumo) e
   "+ Nova orquestração" (abre o rascunho no canvas).
 - **Painel lateral.** Com um nó selecionado, mostra o terminal completo ou o

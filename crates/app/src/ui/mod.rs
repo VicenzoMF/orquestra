@@ -441,12 +441,15 @@ impl OrquestraApp {
         }
         self.st.select_new(orchestrator);
         self.created(repo);
+        // Sem rascunho, a sessão vai para baixo das outras: reenquadra.
+        self.canvas.request_fit();
     }
 
-    /// Orquestração nova: o canvas reenquadra e o repositório vai para os recentes.
+    /// Orquestração nova: sai do foco de sessão e o repositório vai para os
+    /// recentes. A vista fica onde está: pelo rascunho, a moldura nasce onde
+    /// estava a janela.
     fn created(&mut self, repo: PathBuf) {
         self.st.focus = None;
-        self.canvas.request_fit();
         let recent = &mut self.config.recent_repos;
         recent.retain(|r| *r != repo);
         recent.insert(0, repo);
@@ -699,13 +702,25 @@ mod tests {
             Modifiers::COMMAND | Modifiers::SHIFT,
         );
         frame(&ctx, &mut app);
-        // A moldura da sessão nova fica onde estava a janela.
+        // A moldura da sessão nova fica onde estava a janela, e a vista não
+        // pula: nem ao iniciar, nem quando a sessão e o orquestrador chegam.
         let at = pos2(640.0, 420.0);
         app.canvas.draft_mut().unwrap().at = at;
+        let view = app.canvas.scene_rect;
         key(&ctx, &mut app, Key::Enter, Modifiers::NONE);
         assert!(app.canvas.draft().is_none(), "Enter não iniciou");
         wait_sessions(&ctx, &mut app, &shared, 1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while shared.model().agent_count() < 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "orquestrador não chegou"
+            );
+            frame(&ctx, &mut app);
+            std::thread::sleep(Duration::from_millis(20));
+        }
         frame(&ctx, &mut app);
+        assert_eq!(app.canvas.scene_rect, view, "a vista pulou ao iniciar");
         {
             let model = shared.model();
             let session = &model.sessions()[0];
