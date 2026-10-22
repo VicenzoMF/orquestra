@@ -468,7 +468,8 @@ impl Model {
     }
 
     /// "N rodando" conta só workers, como o "N agentes" ao lado; sem workers
-    /// rodando, só o orquestrador trabalhando de fato (não esperando os filhos).
+    /// rodando, só o agente que delega trabalhando de fato (não esperando os
+    /// filhos).
     fn running_summary(&self, session: SessionId) -> Option<String> {
         let agents = self.agents_of(session);
         let busy = |a: &AgentView| matches!(a.kind(), StatusKind::Running | StatusKind::Starting);
@@ -482,7 +483,7 @@ impl Model {
             .iter()
             .any(|a| a.is_orchestrator() && !a.watching && busy(a))
         {
-            Some("orquestrador rodando".to_owned())
+            Some("rodando".to_owned())
         } else {
             None
         }
@@ -633,7 +634,7 @@ mod tests {
         let (orq, ev) = created(s, "orquestrador", AgentRole::Orchestrator, None);
         m.apply(&ev);
         m.apply(&status(orq, AgentStatus::Running));
-        assert_eq!(m.session_summary(s).0, "orquestrador rodando");
+        assert_eq!(m.session_summary(s).0, "rodando");
         let (w, ev) = created(s, "w", AgentRole::Worker, Some(orq));
         m.apply(&ev);
         m.apply(&status(w, AgentStatus::Running));

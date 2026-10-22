@@ -27,7 +27,8 @@ use crate::state::{Grant, State, WaitSpec};
 const CLOSED: &str = "a sessão desta orquestração foi encerrada";
 
 /// Onde um agente novo trabalha: `dir` (ou a pasta da sessão) e `mode`
-/// ("worktree" ou "pasta"; padrão: worktree se a pasta for git).
+/// ("worktree" ou "folder", que também aceita "pasta"; padrão: worktree se a
+/// pasta for git).
 async fn choose_workspace(
     session_dir: &Path,
     dir: Option<&str>,
@@ -52,15 +53,15 @@ async fn choose_workspace(
         None | Some("") => git.is_some(),
         Some("worktree") if git.is_none() => {
             return Err(format!(
-                "{} não é um repositório git: use workspace \"pasta\"",
+                "{} não é um repositório git: use workspace \"folder\"",
                 path.display()
             ));
         }
         Some("worktree") => true,
-        Some("pasta" | "folder" | "dir") => false,
+        Some("folder" | "pasta" | "dir") => false,
         Some(other) => {
             return Err(format!(
-                "workspace inválido: {other} (use \"worktree\" ou \"pasta\")"
+                "workspace inválido: {other} (use \"worktree\" ou \"folder\")"
             ));
         }
     };
@@ -144,7 +145,7 @@ impl Shared {
         let (dir, mode) = match &workspace {
             Workspace::Worktree { repo, .. } => (repo.clone(), "worktree"),
             Workspace::Directory { path } | Workspace::Restore { path, .. } => {
-                (path.clone(), "pasta")
+                (path.clone(), "folder")
             }
         };
 

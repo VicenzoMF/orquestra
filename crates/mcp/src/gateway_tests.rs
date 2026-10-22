@@ -414,13 +414,13 @@ async fn spawn_agent_chooses_where_each_agent_works() {
     let reply = spawn(json!({"name": "busca", "task": "t", "workspace": "pasta"}))
         .await
         .unwrap();
-    assert_eq!(reply["workspace"], "pasta");
+    assert_eq!(reply["workspace"], "folder");
     // `dir` relativo parte da pasta da sessão; fora de um repositório, o
     // padrão é trabalhar direto na pasta.
     let reply = spawn(json!({"name": "notas", "task": "t", "dir": "../notas"}))
         .await
         .unwrap();
-    assert_eq!(reply["workspace"], "pasta");
+    assert_eq!(reply["workspace"], "folder");
     let configs = h.spawned_configs();
     assert_eq!(
         configs[0].workspace,

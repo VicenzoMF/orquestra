@@ -1,4 +1,4 @@
-//! App eframe: barra superior, canvas (com o rascunho de orquestração e os
+//! App eframe: barra superior, canvas (com o rascunho de agente e os
 //! painéis flutuantes), painel do agente selecionado, barra de status e
 //! diálogos. Lê o `Model` (montado pela task de eventos) e só manda `Command`.
 
@@ -20,9 +20,7 @@ use std::sync::Arc;
 use egui::{
     CentralPanel, Frame, Key, Modifiers, Panel, TextureHandle, UserAttentionType, ViewportCommand,
 };
-use orquestra_core::{
-    AgentId, AppConfig, Command, CommandSender, SessionConfig, SessionId, TermSize,
-};
+use orquestra_core::{AgentId, AppConfig, Command, CommandSender, SessionId, TermSize};
 use tracing::warn;
 
 use crate::actions;
@@ -437,9 +435,9 @@ impl OrquestraApp {
         }
     }
 
-    /// Pedido do `orq`: abre o repositório (no rascunho do canvas, ou já a
-    /// orquestração quando veio com objetivo). Vindo de outro terminal, traz a janela para
-    /// a frente (no X11 isso também a restaura); no Wayland o compositor não
+    /// Pedido do `orq`: abre a pasta (no rascunho do canvas, ou já um agente
+    /// quando veio com tarefa). Vindo de outro terminal, traz a janela para a
+    /// frente (no X11 isso também a restaura); no Wayland o compositor não
     /// deixa, então ela pede atenção.
     fn open(&mut self, ctx: &egui::Context, request: OpenRequest, remote: bool) {
         if remote {
@@ -451,33 +449,27 @@ impl OrquestraApp {
         let Some(repo) = request.repo else {
             return;
         };
-        let Some(goal) = request.goal.filter(|g| !g.trim().is_empty()) else {
+        let Some(task) = request.goal.filter(|g| !g.trim().is_empty()) else {
             self.canvas.open_draft_in(&self.config, &repo);
             return;
         };
-        let Some(preset) = actions::default_orchestrator(&self.config) else {
-            warn!("nenhum preset pode orquestrar; abrindo o rascunho");
+        let Some(preset) = actions::default_preset(&self.config) else {
+            warn!("nenhum tipo de agente na config; abrindo o rascunho");
             self.canvas.open_draft_in(&self.config, &repo);
             return;
         };
-        let session = SessionConfig::new(
-            actions::session_name(&repo, &goal),
-            repo.clone(),
-            goal.trim(),
-        );
-        let (_, orchestrator, commands) =
-            actions::new_orchestration(&self.config, session, preset, self.st.spawn_size());
+        let spec = actions::NewAgent::new(repo.clone(), Some(task));
+        let (_, agent, commands) = actions::new_agent(spec, preset, self.st.spawn_size());
         for c in commands {
             let _ = self.cmd.send(c);
         }
-        self.st.select_new(orchestrator);
+        self.st.select_new(agent);
         self.created(repo);
         // Sem rascunho, a sessão vai para baixo das outras: reenquadra.
         self.canvas.request_fit();
     }
 
-    /// Orquestração nova: sai do foco de sessão e o repositório vai para os
-    /// recentes. A vista fica onde está: pelo rascunho, a moldura nasce onde
+    /// Agente novo: sai do foco de sessão e a pasta vai para os recentes. A vista fica onde está: pelo rascunho, a moldura nasce onde
     /// estava a janela.
     fn created(&mut self, repo: PathBuf) {
         self.st.focus = None;
@@ -777,22 +769,21 @@ mod tests {
         shutdown(&runtime, &cmd, hub);
     }
 
-    /// "+ Novo agente": um agente sozinho numa pasta qualquer (aqui, sem
-    /// git), numa sessão só dele, trabalhando direto nela; sem tarefa, ele só
-    /// abre, esperando você.
+    /// "+ Novo agente" numa pasta qualquer (aqui, sem git): uma sessão só
+    /// dele, trabalhando direto na pasta; sem tarefa, ele só abre, esperando
+    /// você. Por padrão ele pode criar outros agentes.
     #[test]
-    fn agent_draft_opens_an_agent_in_any_folder() {
+    fn new_agent_opens_in_any_folder() {
         let runtime = runtime();
         let (ctx, mut app, shared, cmd, hub) = mock_app(&runtime, false);
         let notes = tempfile::tempdir().unwrap();
         frame(&ctx, &mut app);
 
-        app.canvas.open_agent_draft(&app.config);
+        app.canvas.open_draft(&app.config);
         app.canvas.draft_mut().unwrap().set_repo(notes.path());
         frame(&ctx, &mut app);
         let draft = app.canvas.draft().unwrap();
-        assert_eq!(draft.kind, draft::DraftKind::Agent);
-        assert!(draft.agent(&app.config).is_ok(), "a tarefa é opcional");
+        assert!(draft.spec(&app.config).is_ok(), "a tarefa é opcional");
         key(&ctx, &mut app, Key::Enter, Modifiers::NONE);
         assert!(app.canvas.draft().is_none(), "Enter não iniciou");
         wait_sessions(&ctx, &mut app, &shared, 1);
@@ -805,11 +796,11 @@ mod tests {
         {
             let model = shared.model();
             let session = &model.sessions()[0];
-            assert_eq!(session.orchestrator, None);
             assert_eq!(session.config.repo, notes.path());
             let agents = model.agents_of(session.id);
             assert_eq!(agents.len(), 1);
             let agent = agents[0];
+            assert_eq!(session.orchestrator, Some(agent.id), "pode delegar");
             assert_eq!(agent.config.parent, None);
             assert_eq!(agent.config.initial_prompt, None);
             assert_eq!(
@@ -820,18 +811,12 @@ mod tests {
             );
             assert_eq!(app.st.selected, Some(agent.id));
         }
-        // O modo fica no rascunho até trocar: "+ Nova orquestração" volta.
-        app.canvas.open_draft(&app.config);
-        assert_eq!(
-            app.canvas.draft().unwrap().kind,
-            draft::DraftKind::Orchestration
-        );
 
         shutdown(&runtime, &cmd, hub);
     }
 
-    /// Botão direito no fundo do canvas: menu com "Iniciar novo agente
-    /// orquestrador", que abre o rascunho onde foi o clique.
+    /// Botão direito no fundo do canvas: menu com "Iniciar novo agente", que
+    /// abre o rascunho onde foi o clique.
     #[test]
     fn right_click_on_the_canvas_opens_the_draft() {
         let runtime = runtime();
@@ -839,7 +824,8 @@ mod tests {
         for _ in 0..2 {
             frame(&ctx, &mut app);
         }
-        let at = pos2(200.0, 300.0);
+        // Alto o bastante para o rascunho com todas as opções caber abaixo.
+        let at = pos2(200.0, 200.0);
         click(&ctx, &mut app, at, PointerButton::Secondary);
         assert!(egui::Popup::is_any_open(&ctx), "menu não abriu");
         assert!(app.canvas.draft().is_none());
@@ -867,7 +853,7 @@ mod tests {
         // O cursor já está no objetivo.
         type_text(&ctx, &mut app, "login");
         let draft = app.canvas.draft().unwrap();
-        assert_eq!(draft.session(&app.config).err(), Some("Falta a pasta"));
+        assert_eq!(draft.spec(&app.config).err(), Some("Falta a pasta"));
 
         shutdown(&runtime, &cmd, hub);
     }
@@ -1059,10 +1045,9 @@ mod tests {
         app.st.focus = None;
         frame(&ctx, &mut app);
         let view = app.canvas.scene_rect;
-        let api = SessionConfig::new("api", "/src/api", "documentar a API");
+        let api = actions::NewAgent::new("/src/api", Some("documentar a API".to_owned()));
         let preset = &app.config.presets[0];
-        let (_, _, commands) =
-            actions::new_orchestration(&app.config, api, preset, TermSize::default());
+        let (_, _, commands) = actions::new_agent(api, preset, TermSize::default());
         for c in commands {
             cmd.send(c).unwrap();
         }

@@ -1,7 +1,7 @@
 //! Canvas com pan/zoom (`egui::Scene`): uma moldura por sessão, onde a
-//! pessoa a pôs (arrastando o cabeçalho), com o orquestrador à esquerda e os
+//! pessoa a pôs (arrastando o cabeçalho), com quem pode delegar à esquerda e os
 //! workers em coluna, ligados por linhas ortogonais na cor do status do
-//! filho. O botão direito no fundo abre um menu; o rascunho de orquestração
+//! filho. O botão direito no fundo abre um menu; o rascunho de agente
 //! (`draft.rs`) fica ancorado aqui. Por cima, fixos na tela, os painéis de
 //! `overlay`.
 
@@ -20,7 +20,7 @@ use egui::{
 };
 use orquestra_core::{AgentStatus, AppConfig, Command, QueueReason, SessionId};
 
-use super::draft::{self, Draft, DraftKind};
+use super::draft::{self, Draft};
 use super::overlay::{self, INSET_BOTTOM, INSET_TOP};
 use super::widgets::{self, kind_label, paint_elided};
 use super::{Action, Ctx, Resources, UiState};
@@ -59,7 +59,7 @@ pub struct CanvasState {
     pub zoom: f32,
     structure: u64,
     viewport: Rect,
-    /// Rascunho de orquestração (um por vez).
+    /// Rascunho de agente novo (um por vez).
     draft: Option<Draft>,
     /// Onde pôr o rascunho, resolvido no próximo frame depois do ajuste.
     place_draft: Option<Placement>,
@@ -93,7 +93,6 @@ enum Placement {
 
 /// Itens do menu do botão direito no fundo do canvas.
 enum MenuChoice {
-    NewOrchestrator,
     NewAgent,
 }
 
@@ -176,42 +175,22 @@ impl CanvasState {
     /// Abre o rascunho no centro da área visível; se já há um, traz ele para
     /// lá com o texto.
     pub fn open_draft(&mut self, config: &AppConfig) {
-        self.open_draft_with(
-            config,
-            None,
-            Some(DraftKind::Orchestration),
-            Placement::Center,
-        );
+        self.open_draft_with(config, None, Placement::Center);
     }
 
-    /// Rascunho de um agente sozinho numa pasta ("+ Novo agente").
-    pub fn open_agent_draft(&mut self, config: &AppConfig) {
-        self.open_draft_with(config, None, Some(DraftKind::Agent), Placement::Center);
-    }
-
-    /// Rascunho já com esta pasta (`orq <pasta>`): falta só o objetivo.
+    /// Rascunho já com esta pasta (`orq <pasta>`): falta só a tarefa.
     pub fn open_draft_in(&mut self, config: &AppConfig, repo: &Path) {
-        self.open_draft_with(config, Some(repo), None, Placement::Center);
+        self.open_draft_with(config, Some(repo), Placement::Center);
     }
 
-    /// `kind: None` mantém o modo do rascunho aberto (ou orquestração).
-    fn open_draft_with(
-        &mut self,
-        config: &AppConfig,
-        repo: Option<&Path>,
-        kind: Option<DraftKind>,
-        place: Placement,
-    ) {
+    fn open_draft_with(&mut self, config: &AppConfig, repo: Option<&Path>, place: Placement) {
         let draft = self
             .draft
             .get_or_insert_with(|| Draft::new(config, repo, self.auto_fit));
         if let Some(repo) = repo {
             draft.set_repo(repo);
         }
-        if let Some(kind) = kind {
-            draft.kind = kind;
-        }
-        draft.focus_goal();
+        draft.focus_task();
         self.place_draft = Some(place);
         // A vista não pula enquanto a pessoa digita.
         self.auto_fit = false;
@@ -518,18 +497,9 @@ pub fn show(
     response.context_menu(|ui| choice = background_menu(ui));
     if let Some(choice) = choice {
         match choice {
-            MenuChoice::NewOrchestrator => {
-                let at = cs.menu_at;
-                cs.open_draft_with(
-                    cx.config,
-                    None,
-                    Some(DraftKind::Orchestration),
-                    Placement::At(at),
-                );
-            }
             MenuChoice::NewAgent => {
                 let at = cs.menu_at;
-                cs.open_draft_with(cx.config, None, Some(DraftKind::Agent), Placement::At(at));
+                cs.open_draft_with(cx.config, None, Placement::At(at));
             }
         }
     }
@@ -555,14 +525,7 @@ pub fn show(
 
 fn background_menu(ui: &mut Ui) -> Option<MenuChoice> {
     let mut choice = None;
-    if ui.button("Iniciar novo agente orquestrador").clicked() {
-        choice = Some(MenuChoice::NewOrchestrator);
-    }
-    if ui
-        .button("Iniciar novo agente")
-        .on_hover_text("Um agente só, numa pasta qualquer")
-        .clicked()
-    {
+    if ui.button("Iniciar novo agente").clicked() {
         choice = Some(MenuChoice::NewAgent);
     }
     choice
@@ -655,7 +618,7 @@ fn toolbar(
                 let has_sessions = !cx.model.sessions().is_empty();
                 let solo = ui
                     .add_enabled(has_sessions, egui::Button::new("+ Agente na sessão"))
-                    .on_hover_text("Mais um agente numa sessão aberta, sem o orquestrador")
+                    .on_hover_text("Mais um agente numa sessão aberta, sem criar outros")
                     .on_disabled_hover_text("Abra uma sessão primeiro");
                 if solo.clicked() {
                     dialogs.open_solo(cx, st);
@@ -749,14 +712,14 @@ fn draw(
         painter.text(
             c + vec2(0.0, 8.0),
             Align2::CENTER_CENTER,
-            "Clique com o botão direito para iniciar um agente ou um orquestrador",
+            "Clique com o botão direito para iniciar um agente",
             FontId::proportional(14.0),
             theme::TEXT_DIM,
         );
         painter.text(
             c + vec2(0.0, 30.0),
             Align2::CENTER_CENTER,
-            "ou use “+ Novo agente” e “+ Nova orquestração” (Ctrl+Shift+N)",
+            "ou use “+ Novo agente” (Ctrl+Shift+N)",
             FontId::proportional(12.5),
             theme::TEXT_DIM,
         );
@@ -1305,7 +1268,7 @@ fn orchestrator_card(
     let choice = pending_choice(agent, &preview);
     let shown = shown_status(agent, choice.is_some());
     card_frame(&painter, rect, shown.0, st.selected == Some(agent.id));
-    card_header(&painter, rect, shown, "orquestrador", true);
+    card_header(&painter, rect, shown, &agent.config.name, true);
     let x = rect.left() + 16.0;
     let w = rect.width() - 32.0;
     painter.text(
@@ -1316,30 +1279,33 @@ fn orchestrator_card(
         theme::TEXT_DIM,
     );
 
-    // Objetivo em até duas linhas.
+    // A tarefa (a primeira mensagem) em até duas linhas.
     painter.text(
         pos2(x, rect.top() + 66.0),
         Align2::LEFT_CENTER,
-        "Objetivo",
+        "Tarefa",
         FontId::proportional(11.0),
         theme::TEXT_DIM,
     );
-    let mut job = egui::text::LayoutJob::simple(
-        session.config.goal.clone(),
-        FontId::proportional(13.0),
-        theme::TEXT,
-        w,
-    );
+    let (task, color) = if session.config.goal.trim().is_empty() {
+        (
+            "sem tarefa: fale com ele abaixo".to_owned(),
+            theme::TEXT_DIM,
+        )
+    } else {
+        (session.config.goal.clone(), theme::TEXT)
+    };
+    let mut job = egui::text::LayoutJob::simple(task, FontId::proportional(13.0), color, w);
     job.wrap.max_rows = 2;
     job.wrap.overflow_character = Some('…');
     let galley = painter.layout_job(job);
-    painter.galley(pos2(x, rect.top() + 76.0), galley, theme::TEXT);
+    painter.galley(pos2(x, rect.top() + 76.0), galley, color);
 
     // Progresso.
     let (done, total) = cx.model.progress(agent.id);
     let py = rect.top() + 124.0;
     let label = if total == 0 {
-        "nenhum agente criado".to_owned()
+        "ainda não criou agentes".to_owned()
     } else {
         format!("{done} de {total} prontas")
     };
@@ -1378,14 +1344,14 @@ fn orchestrator_card(
         return;
     }
 
-    // Campo de conversa: texto + Enter vai para o PTY do orquestrador.
+    // Campo de conversa: texto + Enter vai para o PTY do agente.
     let field = Rect::from_min_size(pos2(x, rect.top() + 164.0), vec2(w - 38.0, 28.0));
     let send = Rect::from_min_size(pos2(field.right() + 6.0, field.top()), vec2(32.0, 28.0));
     let text = st.chat.entry(agent.id).or_default();
     let edit = ui.put(
         field,
         TextEdit::singleline(text)
-            .hint_text("Fale com o orquestrador…")
+            .hint_text("Fale com o agente…")
             .margin(Margin::symmetric(8, 5)),
     );
     let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));

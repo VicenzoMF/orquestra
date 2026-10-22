@@ -20,10 +20,7 @@ pub fn load_config_file(path: &Path) -> Result<AppConfig> {
             )));
         }
     };
-    let mut config: AppConfig =
-        toml::from_str(&text).map_err(|err| Error::Config(describe(path, &text, &err)))?;
-    config.orchestration.upgrade();
-    Ok(config)
+    toml::from_str(&text).map_err(|err| Error::Config(describe(path, &text, &err)))
 }
 
 /// Grava de forma atômica: arquivo temporário no mesmo diretório, `fsync` e

@@ -13,7 +13,7 @@ use orquestra_core::{
 };
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::actions;
+use crate::actions::{self, NewAgent};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerPlan {
@@ -208,30 +208,28 @@ pub async fn seed(cmd: CommandSender, mut rx: EventReceiver, config: AppConfig, 
             .unwrap_or_else(|| config.presets[0].clone())
     };
 
-    let loja = SessionConfig {
+    let loja = NewAgent {
+        name: Some("loja · login + produtos".to_owned()),
         max_workers: Some(3),
-        ..SessionConfig::new(
-            "loja · login + produtos",
+        ..NewAgent::new(
             projects.join("loja"),
-            "Login com e-mail e página de produtos",
+            Some("Login com e-mail e página de produtos".to_owned()),
         )
     };
-    let (_, _, commands) =
-        actions::new_orchestration(&config, loja, &preset("Claude Code"), TermSize::default());
+    let (_, _, commands) = actions::new_agent(loja, &preset("Claude Code"), TermSize::default());
     for c in commands {
         let _ = cmd.send(c);
     }
 
-    let blog = SessionConfig {
+    let blog = NewAgent {
+        name: Some("blog · migração para Astro".to_owned()),
         approve_spawns: true,
-        ..SessionConfig::new(
-            "blog · migração para Astro",
+        ..NewAgent::new(
             projects.join("blog"),
-            "Migrar o blog de Jekyll para Astro sem quebrar links",
+            Some("Migrar o blog de Jekyll para Astro sem quebrar links".to_owned()),
         )
     };
-    let (blog_id, _, commands) =
-        actions::new_orchestration(&config, blog, &preset("Codex"), TermSize::default());
+    let (blog_id, _, commands) = actions::new_agent(blog, &preset("Codex"), TermSize::default());
     for c in commands {
         let _ = cmd.send(c);
     }

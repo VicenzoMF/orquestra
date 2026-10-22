@@ -168,13 +168,6 @@ fn first_line(text: &str, max: usize) -> String {
     }
 }
 
-/// Nome da sessão a partir do prompt do orquestrador (`... sessão "nome" ...`).
-fn session_name(prompt: &str) -> Option<&str> {
-    let start = prompt.find('"')? + 1;
-    let end = start + prompt[start..].find('"')?;
-    Some(&prompt[start..end])
-}
-
 pub fn script_for(config: &AgentConfig, cwd: &str) -> Vec<Step> {
     let prompt = config.initial_prompt.clone().unwrap_or_default();
     if config.kind == AgentKind::Shell || config.kind == AgentKind::Custom {
@@ -185,15 +178,20 @@ pub fn script_for(config: &AgentConfig, cwd: &str) -> Vec<Step> {
         _ => claude_banner(cwd, &prompt),
     };
     if config.role == AgentRole::Orchestrator {
-        steps.extend(orchestrator(config.kind, &prompt));
+        // O plano é o da pasta (loja, blog...), como o diretor faz pelo nome
+        // da sessão.
+        let folder = std::path::Path::new(cwd)
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        steps.extend(orchestrator(config.kind, &folder));
         return steps;
     }
     steps.extend(worker(config.kind, &config.name));
     steps
 }
 
-fn orchestrator(kind: AgentKind, prompt: &str) -> Vec<Step> {
-    let plan = session_name(prompt).map(plan_for).unwrap_or_default();
+fn orchestrator(kind: AgentKind, folder: &str) -> Vec<Step> {
+    let plan = plan_for(folder);
     let mut s = vec![Spin("Planejando", 2000)];
     s.push(say(&format!(
         "Vou dividir o objetivo em {} tarefas independentes, uma por agente:",
@@ -414,15 +412,6 @@ mod tests {
     use super::*;
     use crate::term::AgentTerm;
     use orquestra_core::TermSize;
-
-    #[test]
-    fn session_name_comes_from_prompt() {
-        assert_eq!(
-            session_name("Você é o orquestrador da sessão \"loja · x\" do orquestra."),
-            Some("loja · x")
-        );
-        assert_eq!(session_name("sem aspas"), None);
-    }
 
     #[test]
     fn visible_len_ignores_sgr() {

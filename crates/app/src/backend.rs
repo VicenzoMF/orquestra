@@ -144,7 +144,7 @@ pub fn spawn_ui_feeds(
 mod tests {
     use std::time::Duration;
 
-    use orquestra_core::{AgentRole, AgentStatus, Command, SessionConfig, TermSize};
+    use orquestra_core::{AgentRole, AgentStatus, Command, TermSize};
 
     use super::*;
     use crate::actions;
@@ -173,9 +173,12 @@ mod tests {
             Arc::new(|| {}),
         );
 
-        let session = SessionConfig::new("loja · teste", "/tmp/loja", "login");
+        let spec = actions::NewAgent {
+            name: Some("loja · teste".to_owned()),
+            ..actions::NewAgent::new("/tmp/loja", Some("login".to_owned()))
+        };
         let (sid, orq, commands) =
-            actions::new_orchestration(&config, session, &config.presets[0], TermSize::default());
+            actions::new_agent(spec, &config.presets[0], TermSize::default());
         for c in commands {
             cmd.send(c).unwrap();
         }

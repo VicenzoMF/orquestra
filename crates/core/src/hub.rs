@@ -68,7 +68,7 @@ pub struct Hub<R, B, S, N, G> {
     inner: Arc<Inner<R, B, S, N, G>>,
     recorder_rx: EventReceiver,
     events_rx: EventReceiver,
-    max_workers: u32,
+    orchestration: OrchestrationConfig,
 }
 
 struct Inner<R, B, S, N, G> {
@@ -101,7 +101,7 @@ where
             inner: Arc::new(inner),
             recorder_rx,
             events_rx,
-            max_workers: config.orchestration.max_concurrent_workers,
+            orchestration: config.orchestration,
         }
     }
 
@@ -112,10 +112,10 @@ where
             inner,
             recorder_rx,
             mut events_rx,
-            max_workers,
+            orchestration,
         } = self;
         let recorder = inner.clone().spawn_recorder(recorder_rx);
-        let mut router = Router::new(inner.clone(), max_workers);
+        let mut router = Router::new(inner.clone(), orchestration);
 
         loop {
             tokio::select! {
@@ -158,7 +158,8 @@ where
 }
 
 enum LaneCmd {
-    Spawn(Box<AgentConfig>),
+    /// Com as instruções escondidas de quem pode criar agentes.
+    Spawn(Box<AgentConfig>, Option<String>),
     Run(Command),
 }
 
@@ -183,7 +184,8 @@ struct Router<R, B, S, N, G> {
     agents: HashMap<AgentId, Entry>,
     /// Ordem de chegada dos spawns na fila.
     queue: Vec<AgentId>,
-    max_workers: u32,
+    /// Limite de vagas e as instruções de quem pode criar agentes.
+    orchestration: OrchestrationConfig,
 }
 
 impl<R, B, S, N, G> Router<R, B, S, N, G>
@@ -194,7 +196,7 @@ where
     N: Notifier,
     G: OrchestratorGateway,
 {
-    fn new(inner: Arc<Inner<R, B, S, N, G>>, max_workers: u32) -> Self {
+    fn new(inner: Arc<Inner<R, B, S, N, G>>, orchestration: OrchestrationConfig) -> Self {
         Self {
             inner,
             lanes: HashMap::new(),
@@ -202,7 +204,7 @@ where
             sessions: HashMap::new(),
             agents: HashMap::new(),
             queue: Vec::new(),
-            max_workers,
+            orchestration,
         }
     }
 
@@ -213,7 +215,7 @@ where
                 self.tasks.spawn(self.inner.clone().load_history(limit));
             }
             Command::SaveConfig(config) => {
-                self.max_workers = config.orchestration.max_concurrent_workers;
+                self.orchestration = config.orchestration.clone();
                 self.tasks.spawn(self.inner.clone().save_config(config));
                 self.try_dequeue();
             }
@@ -472,11 +474,15 @@ where
         entry.queued = None;
         entry.status = AgentStatus::Starting;
         let config = Box::new((*entry.config).clone());
+        let instructions = (config.role == AgentRole::Orchestrator)
+            .then(|| self.sessions.get(&session))
+            .flatten()
+            .map(|s| self.orchestration.render_delegation(s));
         self.publish(AgentEvent::StatusChanged {
             id,
             status: AgentStatus::Starting,
         });
-        self.send_lane(id, LaneCmd::Spawn(config));
+        self.send_lane(id, LaneCmd::Spawn(config, instructions));
         true
     }
 
@@ -499,7 +505,8 @@ where
                 }
             }
         }
-        total < self.max_workers && session_max.is_none_or(|max| in_session < max)
+        total < self.orchestration.max_concurrent_workers
+            && session_max.is_none_or(|max| in_session < max)
     }
 
     fn is_queued(&self, id: AgentId) -> bool {
@@ -572,7 +579,9 @@ where
     async fn run_lane(self: Arc<Self>, id: AgentId, mut rx: mpsc::UnboundedReceiver<LaneCmd>) {
         while let Some(cmd) = rx.recv().await {
             let (name, result) = match cmd {
-                LaneCmd::Spawn(config) => ("spawn", self.spawn_agent(id, *config).await),
+                LaneCmd::Spawn(config, instructions) => {
+                    ("spawn", self.spawn_agent(id, *config, instructions).await)
+                }
                 LaneCmd::Run(cmd) => (cmd.name(), self.handle(id, cmd).await),
             };
             if let Err(err) = result {
@@ -629,7 +638,12 @@ where
 
     /// [navegador] → [credencial do gateway] → runner.spawn → `Spawned`.
     /// O runner pode publicar `StatusChanged`/`Output` antes do `Spawned`.
-    async fn spawn_agent(&self, id: AgentId, config: AgentConfig) -> Result<()> {
+    async fn spawn_agent(
+        &self,
+        id: AgentId,
+        config: AgentConfig,
+        instructions: Option<String>,
+    ) -> Result<()> {
         let Services {
             runner,
             browser,
@@ -659,6 +673,7 @@ where
             mcp_servers: Vec::new(),
             env: BTreeMap::new(),
             stop_hook: None,
+            instructions,
         };
         if let (Some(endpoint), Some(template)) = (&req.browser, &self.browser_mcp) {
             req.mcp_servers.push(template.render(endpoint));
@@ -1604,6 +1619,71 @@ mod tests {
             ]
         );
         assert_eq!(notifications.lock().unwrap()[0].title, "claude-1");
+    }
+
+    /// Só quem pode delegar recebe as instruções escondidas, com a pasta da
+    /// sessão; uma config salva troca o texto dos próximos spawns.
+    #[tokio::test]
+    async fn delegation_instructions_go_only_to_delegating_agents() {
+        let mut h = Harness::start(Opts::default());
+        let s = h.session(loja()).await;
+        let (lead, worker, later) = (
+            AgentId::generate(),
+            AgentId::generate(),
+            AgentId::generate(),
+        );
+        h.send(spawn(
+            lead,
+            AgentConfig {
+                role: AgentRole::Orchestrator,
+                ..agent(s, "claude-code")
+            },
+        ));
+        h.until(|e| matches!(e, AgentEvent::Spawned { info } if info.id == lead))
+            .await;
+        h.send(spawn(
+            worker,
+            AgentConfig {
+                parent: Some(lead),
+                ..agent(s, "api")
+            },
+        ));
+        h.until(|e| matches!(e, AgentEvent::Spawned { info } if info.id == worker))
+            .await;
+
+        let mut config = AppConfig::default();
+        config.orchestration.delegation_prompt = "Delegate from {folder}.".to_owned();
+        h.send(Command::SaveConfig(Box::new(config)));
+        h.send(spawn(
+            later,
+            AgentConfig {
+                role: AgentRole::Orchestrator,
+                ..agent(s, "codex")
+            },
+        ));
+        h.until(|e| matches!(e, AgentEvent::Spawned { info } if info.id == later))
+            .await;
+
+        let instructions = |name: &str| {
+            h.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|r| r.config.name == name)
+                .map(|r| r.instructions.clone())
+                .unwrap()
+        };
+        let lead_text = instructions("claude-code").expect("quem delega recebe");
+        assert!(
+            lead_text.contains("whose folder is /tmp/loja."),
+            "{lead_text}"
+        );
+        assert_eq!(instructions("api"), None, "quem foi criado não delega");
+        assert_eq!(
+            instructions("codex").as_deref(),
+            Some("Delegate from /tmp/loja.")
+        );
+        h.shutdown().await;
     }
 
     /// Reabrir depois de um reinício: o vivo sobe onde estava e retoma a

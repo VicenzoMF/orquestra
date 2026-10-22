@@ -1,12 +1,15 @@
-//! Rascunho no canvas de uma orquestração ou de um agente sozinho numa pasta
-//! (como uma conversa no app do Claude): o botão direito no fundo, "+ Nova
-//! orquestração", "+ Novo agente", Ctrl+Shift+N e `orq <pasta>` abrem esta
+//! Rascunho de um agente novo no canvas: o botão direito no fundo ("Iniciar
+//! novo agente"), "+ Novo agente", Ctrl+Shift+N e `orq <pasta>` abrem esta
 //! janela. Ela é desenhada dentro da `Scene`, em coordenadas do canvas, então
 //! acompanha pan e zoom.
 //!
+//! Não há "orquestrador" à parte: por padrão o agente pode criar outros, e
+//! ele mesmo decide quando dividir o trabalho (as instruções vão escondidas,
+//! no prompt de sistema). A primeira mensagem é só o que a pessoa escreveu.
+//!
 //! Sem popups (ComboBox) aqui dentro: o popup sai na posição certa, mas em
 //! escala 1:1 e com a largura do botão em unidades do canvas, então destoa da
-//! janela com zoom. Preset e recentes são escolhas inline.
+//! janela com zoom. Tipo e recentes são escolhas inline.
 
 use std::path::{Path, PathBuf};
 
@@ -14,41 +17,34 @@ use egui::{
     Align, DragValue, FontId, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, Painter,
     Pos2, Rect, RichText, Sense, Stroke, TextEdit, Ui, UiBuilder, Vec2, pos2, vec2,
 };
-use orquestra_core::{AgentKind, AgentPreset, AppConfig, SessionConfig, SessionId, folder};
+use orquestra_core::{AgentKind, AgentPreset, AppConfig, SessionId, folder};
 
 use super::widgets::{self, kind_label};
 use super::{Action, Ctx, UiState};
-use crate::actions;
+use crate::actions::{self, NewAgent, can_delegate};
+use crate::model::StatusKind;
 use crate::theme;
 
 pub const DRAFT_W: f32 = 360.0;
 /// Altura estimada antes do primeiro frame (para caber na área visível).
-const COMPACT_H: f32 = 200.0;
-const EXPANDED_H: f32 = 500.0;
-
-/// O que o rascunho cria.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum DraftKind {
-    /// Um orquestrador com um objetivo, que cria os agentes.
-    #[default]
-    Orchestration,
-    /// Um agente só, numa pasta qualquer, com uma tarefa ou nenhuma.
-    Agent,
-}
+const COMPACT_H: f32 = 170.0;
+const EXPANDED_H: f32 = 600.0;
 
 pub struct Draft {
     /// Canto superior esquerdo, em coordenadas do canvas.
     pub at: Pos2,
-    pub kind: DraftKind,
+    /// Tipo (nome do preset).
     preset: String,
-    /// Modo agente: o preset, o navegador e o worktree.
-    agent_preset: String,
-    agent_browser: bool,
+    repo: String,
+    task: String,
+    browser: bool,
+    /// Num worktree próprio (só numa pasta git).
     isolate: bool,
+    /// Pode criar outros agentes.
+    delegate: bool,
     /// Pasta do último teste do git e se ela é um repositório.
     git: Option<(String, bool)>,
-    repo: String,
-    goal: String,
+    /// Regras para os agentes que ele criar.
     own_limit: bool,
     max_workers: u32,
     kinds: Vec<(AgentKind, bool)>,
@@ -56,8 +52,8 @@ pub struct Draft {
     approve: bool,
     /// Todas as opções à mostra.
     pub more: bool,
-    /// Põe o cursor no objetivo no próximo frame.
-    focus_goal: bool,
+    /// Põe o cursor na tarefa no próximo frame.
+    focus_task: bool,
     /// O canvas se ajustava sozinho antes de o rascunho abrir.
     pub resume_fit: bool,
     /// Retângulo do último frame.
@@ -74,25 +70,21 @@ pub enum Event {
 
 impl Draft {
     pub fn new(config: &AppConfig, repo: Option<&Path>, resume_fit: bool) -> Self {
-        let preset = actions::default_orchestrator(config)
-            .map(|p| p.name.clone())
-            .unwrap_or_default();
+        let preset = actions::default_preset(config);
         let repo = repo
             .or(config.recent_repos.first().map(PathBuf::as_path))
             .map(|p| tilde(&p.display().to_string()))
             .unwrap_or_default();
-        let agent = config.presets.first();
         Self {
             at: Pos2::ZERO,
-            kind: DraftKind::Orchestration,
-            preset,
-            agent_preset: agent.map(|p| p.name.clone()).unwrap_or_default(),
-            agent_browser: agent.is_some_and(|p| p.browser),
+            preset: preset.map(|p| p.name.clone()).unwrap_or_default(),
+            browser: preset.is_some_and(|p| p.browser),
             isolate: false,
+            delegate: true,
             git: None,
             more: repo.is_empty(),
             repo,
-            goal: String::new(),
+            task: String::new(),
             own_limit: false,
             max_workers: config.orchestration.max_concurrent_workers.min(4),
             kinds: vec![
@@ -102,7 +94,7 @@ impl Draft {
             ],
             browse: true,
             approve: false,
-            focus_goal: true,
+            focus_task: true,
             resume_fit,
             rect: Rect::NOTHING,
             drag_from: None,
@@ -119,12 +111,12 @@ impl Draft {
     }
 
     #[cfg(test)]
-    pub fn set_goal(&mut self, goal: &str) {
-        self.goal = goal.to_owned();
+    pub fn set_task(&mut self, task: &str) {
+        self.task = task.to_owned();
     }
 
-    pub fn focus_goal(&mut self) {
-        self.focus_goal = true;
+    pub fn focus_task(&mut self) {
+        self.focus_task = true;
     }
 
     #[cfg(test)]
@@ -141,65 +133,42 @@ impl Draft {
         }
     }
 
-    /// Sessão e preset do orquestrador, ou o que falta para iniciar.
-    pub fn session<'a>(
+    /// O agente a criar e o tipo dele, ou o que falta. A tarefa é opcional:
+    /// sem ela o agente só abre, esperando você.
+    pub fn spec<'a>(
         &self,
         config: &'a AppConfig,
-    ) -> Result<(SessionConfig, &'a AgentPreset), &'static str> {
-        let goal = self.goal.trim();
-        match (self.repo.trim().is_empty(), goal.is_empty()) {
-            (true, true) => return Err("Falta a pasta e o objetivo"),
-            (true, false) => return Err("Falta a pasta"),
-            (false, true) => return Err("Falta o objetivo"),
-            (false, false) => {}
-        }
-        let kinds: Vec<AgentKind> = self
-            .kinds
-            .iter()
-            .filter(|(_, on)| *on)
-            .map(|(k, _)| *k)
-            .collect();
-        if kinds.is_empty() {
-            return Err("Marque um tipo de agente");
-        }
-        let preset = actions::orchestrator_presets(config)
-            .into_iter()
-            .find(|p| p.name == self.preset)
-            .ok_or("Escolha o orquestrador")?;
-        let repo = expand_home(self.repo.trim());
-        let session = SessionConfig {
-            max_workers: self.own_limit.then_some(self.max_workers),
-            allowed_kinds: kinds,
-            workers_may_browse: self.browse,
-            approve_spawns: self.approve,
-            ..SessionConfig::new(actions::session_name(&repo, goal), repo.clone(), goal)
-        };
-        Ok((session, preset))
-    }
-
-    /// Pasta e preset do agente (modo agente), ou o que falta. A tarefa é
-    /// opcional: sem ela o agente só abre, esperando você.
-    pub fn agent<'a>(
-        &self,
-        config: &'a AppConfig,
-    ) -> Result<(PathBuf, &'a AgentPreset), &'static str> {
+    ) -> Result<(NewAgent, &'a AgentPreset), &'static str> {
         if self.repo.trim().is_empty() {
             return Err("Falta a pasta");
         }
         let preset = config
             .presets
             .iter()
-            .find(|p| p.name == self.agent_preset)
-            .ok_or("Escolha o agente")?;
-        Ok((expand_home(self.repo.trim()), preset))
-    }
-
-    /// O que falta para iniciar, no modo atual.
-    fn missing(&self, config: &AppConfig) -> Result<(), &'static str> {
-        match self.kind {
-            DraftKind::Orchestration => self.session(config).map(drop),
-            DraftKind::Agent => self.agent(config).map(drop),
+            .find(|p| p.name == self.preset)
+            .ok_or("Escolha o tipo")?;
+        let delegate = self.delegate && can_delegate(preset.kind);
+        let kinds: Vec<AgentKind> = self
+            .kinds
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(k, _)| *k)
+            .collect();
+        if delegate && kinds.is_empty() {
+            return Err("Marque um tipo para os agentes que ele criar");
         }
+        let git = self.git.as_ref().is_some_and(|(_, git)| *git);
+        let spec = NewAgent {
+            browser: self.browser,
+            isolate: self.isolate && git,
+            delegate,
+            max_workers: self.own_limit.then_some(self.max_workers),
+            allowed_kinds: kinds,
+            workers_may_browse: self.browse,
+            approve_spawns: self.approve,
+            ..NewAgent::new(expand_home(self.repo.trim()), Some(self.task.clone()))
+        };
+        Ok((spec, preset))
     }
 
     /// A pasta é um repositório git (para oferecer o worktree). O git só roda
@@ -213,35 +182,15 @@ impl Draft {
         self.git.as_ref().is_some_and(|(_, git)| *git)
     }
 
-    /// Manda `CreateSession` + `Spawn` (do orquestrador ou do agente) e
-    /// seleciona quem subiu.
+    /// Manda `CreateSession` + `Spawn` e seleciona o agente.
     pub fn start(&self, cx: &Ctx, st: &mut UiState) -> Option<(SessionId, Action)> {
-        let (id, selected, commands, repo) = match self.kind {
-            DraftKind::Orchestration => {
-                let (session, preset) = self.session(cx.config).ok()?;
-                let repo = session.repo.clone();
-                let (id, orchestrator, commands) =
-                    actions::new_orchestration(cx.config, session, preset, st.spawn_size());
-                (id, orchestrator, commands, repo)
-            }
-            DraftKind::Agent => {
-                let (repo, preset) = self.agent(cx.config).ok()?;
-                let git = self.git.as_ref().is_some_and(|(_, git)| *git);
-                let (id, agent, commands) = actions::new_agent(
-                    &repo,
-                    preset,
-                    Some(self.goal.clone()),
-                    self.agent_browser,
-                    self.isolate && git,
-                    st.spawn_size(),
-                );
-                (id, agent, commands, repo)
-            }
-        };
+        let (spec, preset) = self.spec(cx.config).ok()?;
+        let repo = spec.folder.clone();
+        let (id, agent, commands) = actions::new_agent(spec, preset, st.spawn_size());
         for c in commands {
             cx.send(c);
         }
-        st.select_new(selected);
+        st.select_new(agent);
         Some((id, Action::Created { repo }))
     }
 
@@ -275,6 +224,16 @@ impl Draft {
         inner.inner
     }
 
+    /// Vai poder criar outros agentes (a opção e o tipo permitem).
+    fn delegates(&self, config: &AppConfig) -> bool {
+        self.delegate
+            && config
+                .presets
+                .iter()
+                .find(|p| p.name == self.preset)
+                .is_some_and(|p| can_delegate(p.kind))
+    }
+
     fn contents(&mut self, ui: &mut Ui, cx: &Ctx) -> Option<Event> {
         // O fundo dos widgets inativos é o dos cards: aqui some sem isto.
         let inactive = &mut ui.visuals_mut().widgets.inactive;
@@ -296,51 +255,33 @@ impl Draft {
         }
         let painter = ui.painter();
         let icon = pos2(title.left() + 6.0, title.center().y);
-        let heading = match self.kind {
-            DraftKind::Orchestration => {
-                theme::paint_star(painter, icon, 7.0, theme::WAITING);
-                "Novo orquestrador"
-            }
-            DraftKind::Agent => {
-                theme::paint_status_icon(painter, icon, 5.0, crate::model::StatusKind::Running);
-                "Novo agente"
-            }
-        };
+        // A estrela marca quem pode criar outros agentes, como no card.
+        if self.delegates(cx.config) {
+            theme::paint_star(painter, icon, 7.0, theme::WAITING);
+        } else {
+            theme::paint_status_icon(painter, icon, 5.0, StatusKind::Running);
+        }
         painter.text(
             pos2(title.left() + 20.0, title.center().y),
             egui::Align2::LEFT_CENTER,
-            heading,
+            "Novo agente",
             FontId::proportional(14.5),
             theme::TEXT,
         );
         ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            let kind = self.kind;
-            ui.selectable_value(&mut self.kind, DraftKind::Orchestration, "Orquestração")
-                .on_hover_text("Um orquestrador divide o objetivo entre vários agentes");
-            ui.selectable_value(&mut self.kind, DraftKind::Agent, "Agente")
-                .on_hover_text("Um agente só, numa pasta qualquer, como uma conversa");
-            if self.kind != kind {
-                self.focus_goal = true;
-            }
-        });
         let git = self.refresh_git();
 
         // Enter inicia; Shift+Enter quebra a linha.
-        let hint = match self.kind {
-            DraftKind::Orchestration => "O que o orquestrador deve entregar",
-            DraftKind::Agent => "O que o agente deve fazer (opcional)",
-        };
-        let goal = ui.add(
-            TextEdit::multiline(&mut self.goal)
+        let task = ui.add(
+            TextEdit::multiline(&mut self.task)
                 .id_salt("draft-goal")
-                .hint_text(hint)
+                .hint_text("O que o agente deve fazer (opcional)")
                 .desired_rows(3)
                 .desired_width(f32::INFINITY)
                 .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter)),
         );
-        if std::mem::take(&mut self.focus_goal) {
-            goal.request_focus();
+        if std::mem::take(&mut self.focus_task) {
+            task.request_focus();
         }
         let enter = ui.input(|i| {
             i.events.iter().any(|e| {
@@ -348,7 +289,7 @@ impl Draft {
                     if !modifiers.shift)
             })
         });
-        let mut start = goal.has_focus() && enter;
+        let mut start = task.has_focus() && enter;
 
         ui.horizontal(|ui| {
             let toggle = if self.more {
@@ -374,14 +315,10 @@ impl Draft {
         if self.more {
             ui.add_space(2.0);
             ui.separator();
-            let folder_focus = match self.kind {
-                DraftKind::Orchestration => self.options(ui, cx.config),
-                DraftKind::Agent => self.agent_options(ui, cx.config, git),
-            };
-            start |= folder_focus && enter;
+            start |= self.options(ui, cx.config, git) && enter;
         }
 
-        let check = self.missing(cx.config);
+        let check = self.spec(cx.config).map(drop);
         ui.add_space(6.0);
         let mut event = None;
         ui.horizontal(|ui| {
@@ -413,25 +350,14 @@ impl Draft {
         } else {
             tilde(repo)
         };
-        let preset = match self.kind {
-            DraftKind::Orchestration => actions::orchestrator_presets(config)
-                .into_iter()
-                .find(|p| p.name == self.preset)
-                .map_or_else(|| "sem orquestrador".to_owned(), |p| p.name.clone()),
-            DraftKind::Agent => {
-                let name = config
-                    .presets
-                    .iter()
-                    .find(|p| p.name == self.agent_preset)
-                    .map_or("sem agente", |p| p.name.as_str());
-                let git = self.git.as_ref().is_some_and(|(_, git)| *git);
-                if self.isolate && git {
-                    format!("{name} · worktree")
-                } else {
-                    name.to_owned()
-                }
-            }
-        };
+        let mut preset = config
+            .presets
+            .iter()
+            .find(|p| p.name == self.preset)
+            .map_or_else(|| "sem tipo".to_owned(), |p| p.name.clone());
+        if self.isolate && self.git.as_ref().is_some_and(|(_, git)| *git) {
+            preset.push_str(" · worktree");
+        }
         let full = format!("{repo} · {preset}");
         let fits = |s: &str| {
             painter
@@ -463,61 +389,19 @@ impl Draft {
     }
 
     /// As opções completas. Devolve se a pasta tinha o foco (Enter nela inicia).
-    fn options(&mut self, ui: &mut Ui, config: &AppConfig) -> bool {
-        field_label(ui, "Orquestrador");
+    fn options(&mut self, ui: &mut Ui, config: &AppConfig, git: bool) -> bool {
+        field_label(ui, "Tipo");
+        let before = self.preset.clone();
         ui.horizontal_wrapped(|ui| {
-            for p in actions::orchestrator_presets(config) {
+            for p in &config.presets {
                 ui.radio_value(&mut self.preset, p.name.clone(), &p.name)
                     .on_hover_text(&p.program);
             }
         });
-
-        let repo = self.folder_field(ui, config);
-
-        let global = config.orchestration.max_concurrent_workers;
-        field_label(ui, "Agentes simultâneos desta orquestração");
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.own_limit, "limitar a");
-            ui.add_enabled(
-                self.own_limit,
-                DragValue::new(&mut self.max_workers).range(1..=global.max(1)),
-            );
-            ui.label(
-                RichText::new(format!("(limite global: {global})"))
-                    .size(12.0)
-                    .color(theme::TEXT_DIM),
-            );
-        });
-
-        field_label(ui, "Tipos de agente que ele pode criar");
-        ui.horizontal_wrapped(|ui| {
-            for (kind, on) in self.kinds.iter_mut() {
-                ui.checkbox(on, kind_label(*kind));
-            }
-        });
-        ui.add_space(4.0);
-        ui.checkbox(&mut self.browse, "Agentes podem pedir navegador");
-        ui.checkbox(
-            &mut self.approve,
-            "Pedir minha aprovação antes de criar cada agente",
-        );
-        repo.lost_focus()
-    }
-
-    /// Opções do modo agente. Devolve se a pasta tinha o foco.
-    fn agent_options(&mut self, ui: &mut Ui, config: &AppConfig, git: bool) -> bool {
-        field_label(ui, "Agente");
-        let before = self.agent_preset.clone();
-        ui.horizontal_wrapped(|ui| {
-            for p in &config.presets {
-                ui.radio_value(&mut self.agent_preset, p.name.clone(), &p.name)
-                    .on_hover_text(&p.program);
-            }
-        });
-        if before != self.agent_preset
-            && let Some(p) = config.presets.iter().find(|p| p.name == self.agent_preset)
+        if before != self.preset
+            && let Some(p) = config.presets.iter().find(|p| p.name == self.preset)
         {
-            self.agent_browser = p.browser;
+            self.browser = p.browser;
         }
 
         let repo = self.folder_field(ui, config);
@@ -528,7 +412,45 @@ impl Draft {
         )
         .on_hover_text("Uma cópia isolada da pasta: para mudar código sem atrapalhar ninguém")
         .on_disabled_hover_text("A pasta não é um repositório git: o agente trabalha nela");
-        ui.checkbox(&mut self.agent_browser, "Dar um navegador a este agente");
+        ui.checkbox(&mut self.browser, "Dar um navegador a este agente");
+        let can = config
+            .presets
+            .iter()
+            .find(|p| p.name == self.preset)
+            .is_some_and(|p| can_delegate(p.kind));
+        ui.add_enabled(
+            can,
+            egui::Checkbox::new(&mut self.delegate, "Pode criar outros agentes"),
+        )
+        .on_hover_text("Ele decide quando vale dividir o trabalho com outros agentes")
+        .on_disabled_hover_text("Só Claude Code e Codex criam agentes");
+
+        if self.delegate && can {
+            ui.indent("draft-delegation", |ui| {
+                let global = config.orchestration.max_concurrent_workers;
+                field_label(ui, "Agentes que ele criar, ao mesmo tempo");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.own_limit, "limitar a");
+                    ui.add_enabled(
+                        self.own_limit,
+                        DragValue::new(&mut self.max_workers).range(1..=global.max(1)),
+                    );
+                    ui.label(
+                        RichText::new(format!("(limite global: {global})"))
+                            .size(12.0)
+                            .color(theme::TEXT_DIM),
+                    );
+                });
+                field_label(ui, "Tipos que ele pode criar");
+                ui.horizontal_wrapped(|ui| {
+                    for (kind, on) in self.kinds.iter_mut() {
+                        ui.checkbox(on, kind_label(*kind));
+                    }
+                });
+                ui.checkbox(&mut self.browse, "Eles podem pedir navegador");
+                ui.checkbox(&mut self.approve, "Pedir minha aprovação antes de cada um");
+            });
+        }
         repo.lost_focus()
     }
 
@@ -591,6 +513,8 @@ fn expand_home(path: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use orquestra_core::AgentRole;
+
     use super::*;
 
     #[test]
@@ -601,28 +525,46 @@ mod tests {
         assert_eq!(tilde(&format!("{home}/x")), "~/x");
     }
 
-    /// Sem recentes, abre com as opções à mostra e não inicia sem pasta e objetivo.
+    /// Sem recentes, abre com as opções à mostra. Só falta a pasta: a tarefa
+    /// é opcional, e por padrão o agente pode criar outros.
     #[test]
-    fn needs_folder_and_goal() {
+    fn needs_only_a_folder() {
         let config = AppConfig::default();
         let mut d = Draft::new(&config, None, true);
         assert!(d.more);
-        assert_eq!(d.session(&config).err(), Some("Falta a pasta e o objetivo"));
+        assert_eq!(d.spec(&config).err(), Some("Falta a pasta"));
         d.set_repo(Path::new("/src/loja"));
-        assert_eq!(d.session(&config).err(), Some("Falta o objetivo"));
-        d.set_goal("  login com e-mail\n");
-        let (session, preset) = d.session(&config).unwrap();
-        assert_eq!(session.repo, PathBuf::from("/src/loja"));
-        assert_eq!(session.goal, "login com e-mail");
-        assert_eq!(session.name, "loja · login com e-mail");
-        assert_eq!(session.max_workers, None);
-        assert!(session.workers_may_browse);
-        assert!(!session.approve_spawns);
+        let (spec, preset) = d.spec(&config).unwrap();
+        assert_eq!(spec.folder, PathBuf::from("/src/loja"));
+        assert!(spec.delegate);
+        assert_eq!(preset.name, config.orchestration.orchestrator_preset);
+        assert_eq!(spec.max_workers, None);
+        assert!(spec.workers_may_browse);
+        assert!(!spec.approve_spawns);
         assert_eq!(
-            session.allowed_kinds,
+            spec.allowed_kinds,
             vec![AgentKind::ClaudeCode, AgentKind::Codex]
         );
-        assert_eq!(preset.name, config.orchestration.orchestrator_preset);
+
+        d.set_task("  login com e-mail\n");
+        let (spec, preset) = d.spec(&config).unwrap();
+        let (_, _, [create, spawn]) =
+            actions::new_agent(spec, preset, orquestra_core::TermSize::default());
+        assert!(
+            matches!(create, orquestra_core::Command::CreateSession { config, .. }
+            if config.name == "loja · login com e-mail" && config.goal == "login com e-mail")
+        );
+        assert!(
+            matches!(spawn, orquestra_core::Command::Spawn { config, .. }
+            if config.role == AgentRole::Orchestrator
+                && config.initial_prompt.as_deref() == Some("login com e-mail"))
+        );
+
+        // Quem delega precisa de ao menos um tipo para criar.
+        d.kinds.iter_mut().for_each(|(_, on)| *on = false);
+        assert!(d.spec(&config).is_err());
+        d.delegate = false;
+        assert!(d.spec(&config).is_ok());
 
         let compact = Draft::new(&config, Some(Path::new("/src/blog")), false);
         assert!(!compact.more);

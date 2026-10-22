@@ -1,47 +1,13 @@
-//! Montagem dos comandos que a UI manda (puro, sem egui): nova orquestração,
-//! agente novo numa pasta, agente avulso numa sessão e mensagem ao terminal.
+//! Montagem dos comandos que a UI manda (puro, sem egui): agente novo numa
+//! pasta, agente avulso numa sessão e mensagem ao terminal.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use orquestra_core::bytes::Bytes;
 use orquestra_core::{
     AgentConfig, AgentId, AgentKind, AgentPreset, AgentRole, AppConfig, Command, SessionConfig,
     SessionId, TermSize, Workspace,
 };
-
-/// `CreateSession` + `Spawn` do orquestrador, nesta ordem (o hub processa em
-/// ordem, então a sessão existe quando o spawn chega).
-pub fn new_orchestration(
-    config: &AppConfig,
-    session: SessionConfig,
-    preset: &AgentPreset,
-    size: TermSize,
-) -> (SessionId, AgentId, [Command; 2]) {
-    let session_id = SessionId::generate();
-    let agent_id = AgentId::generate();
-    let mut agent = preset.to_config(
-        "orquestrador".to_owned(),
-        session_id,
-        Workspace::Directory {
-            path: session.repo.clone(),
-        },
-        size,
-    );
-    agent.role = AgentRole::Orchestrator;
-    agent.browser = false;
-    agent.initial_prompt = Some(config.orchestration.render_prompt(&session));
-    let commands = [
-        Command::CreateSession {
-            id: session_id,
-            config: Box::new(session),
-        },
-        Command::Spawn {
-            id: agent_id,
-            config: Box::new(agent),
-        },
-    ];
-    (session_id, agent_id, commands)
-}
 
 /// Onde um agente criado pela UI trabalha: direto em `folder` ou, com
 /// `isolate` (só numa pasta git), num worktree e branch próprios.
@@ -59,32 +25,85 @@ pub fn workspace(folder: &Path, isolate: bool) -> Workspace {
     }
 }
 
-/// Um agente sozinho numa pasta, como uma conversa no app do Claude: uma
-/// sessão só dele (`CreateSession`) e o agente (`Spawn`), nesta ordem.
+/// Um agente novo numa pasta, numa sessão só dele.
+#[derive(Clone, Debug)]
+pub struct NewAgent {
+    pub folder: PathBuf,
+    /// A primeira mensagem, como você a escreveu. Sem ela o agente só abre.
+    pub task: Option<String>,
+    /// Nome da sessão; `None` = "<pasta> · <tarefa curta>".
+    pub name: Option<String>,
+    pub browser: bool,
+    /// Num worktree próprio (só numa pasta git).
+    pub isolate: bool,
+    /// Pode criar outros agentes: ganha o MCP `orquestra` e as instruções de
+    /// delegação, escondidas no prompt de sistema. Só Claude Code e Codex.
+    pub delegate: bool,
+    /// Regras para os agentes que ele criar.
+    pub max_workers: Option<u32>,
+    pub allowed_kinds: Vec<AgentKind>,
+    pub workers_may_browse: bool,
+    pub approve_spawns: bool,
+}
+
+impl NewAgent {
+    /// Pode delegar; sem worktree, sem navegador; regras padrão da sessão.
+    pub fn new(folder: impl Into<PathBuf>, task: Option<String>) -> Self {
+        let rules = SessionConfig::new("", "", "");
+        Self {
+            folder: folder.into(),
+            task,
+            name: None,
+            browser: false,
+            isolate: false,
+            delegate: true,
+            max_workers: rules.max_workers,
+            allowed_kinds: rules.allowed_kinds,
+            workers_may_browse: rules.workers_may_browse,
+            approve_spawns: rules.approve_spawns,
+        }
+    }
+}
+
+/// O tipo pode criar outros agentes (precisa do MCP: Claude Code ou Codex).
+pub fn can_delegate(kind: AgentKind) -> bool {
+    matches!(kind, AgentKind::ClaudeCode | AgentKind::Codex)
+}
+
+/// `CreateSession` e `Spawn` do agente, nesta ordem (o hub processa em
+/// ordem, então a sessão existe quando o spawn chega).
 pub fn new_agent(
-    folder: &Path,
+    spec: NewAgent,
     preset: &AgentPreset,
-    task: Option<String>,
-    browser: bool,
-    isolate: bool,
     size: TermSize,
 ) -> (SessionId, AgentId, [Command; 2]) {
-    let task = task.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
+    let task = spec
+        .task
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty());
+    let name = spec
+        .name
+        .unwrap_or_else(|| session_name(&spec.folder, task.as_deref().unwrap_or("")));
     let session_id = SessionId::generate();
-    let session = SessionConfig::new(
-        session_name(folder, task.as_deref().unwrap_or("")),
-        folder,
-        task.clone().unwrap_or_default(),
-    );
+    let session = SessionConfig {
+        max_workers: spec.max_workers,
+        allowed_kinds: spec.allowed_kinds,
+        workers_may_browse: spec.workers_may_browse,
+        approve_spawns: spec.approve_spawns,
+        ..SessionConfig::new(name, &spec.folder, task.clone().unwrap_or_default())
+    };
     let agent_id = AgentId::generate();
     let mut agent = preset.to_config(
         agent_name(preset),
         session_id,
-        workspace(folder, isolate),
+        workspace(&spec.folder, spec.isolate),
         size,
     );
+    if spec.delegate && can_delegate(preset.kind) {
+        agent.role = AgentRole::Orchestrator;
+    }
     agent.initial_prompt = task;
-    agent.browser = browser;
+    agent.browser = spec.browser;
     let commands = [
         Command::CreateSession {
             id: session_id,
@@ -165,68 +184,28 @@ pub fn session_name(repo: &std::path::Path, goal: &str) -> String {
     }
 }
 
-/// Presets que podem ser orquestrador (precisam do MCP: Claude Code ou Codex).
-pub fn orchestrator_presets(config: &AppConfig) -> Vec<&AgentPreset> {
+/// Tipo padrão de um agente novo: o da config ou, se ele sumiu, o primeiro.
+pub fn default_preset(config: &AppConfig) -> Option<&AgentPreset> {
     config
         .presets
         .iter()
-        .filter(|p| matches!(p.kind, AgentKind::ClaudeCode | AgentKind::Codex))
-        .collect()
-}
-
-/// Preset do orquestrador: o escolhido na config ou, se ele sumiu, o primeiro
-/// que pode orquestrar.
-pub fn default_orchestrator(config: &AppConfig) -> Option<&AgentPreset> {
-    let presets = orchestrator_presets(config);
-    presets
-        .iter()
         .find(|p| p.name == config.orchestration.orchestrator_preset)
-        .or(presets.first())
-        .copied()
+        .or(config.presets.first())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn new_orchestration_creates_session_then_orchestrator() {
-        let config = AppConfig::default();
-        let session = SessionConfig::new("loja · login", "/src/loja", "login com e-mail");
-        let preset = &config.presets[0];
-        let (sid, aid, [create, spawn]) =
-            new_orchestration(&config, session, preset, TermSize::default());
-        assert!(matches!(create, Command::CreateSession { id, .. } if id == sid));
-        let Command::Spawn { id, config: agent } = spawn else {
-            panic!("esperava Spawn");
-        };
-        assert_eq!(id, aid);
-        assert_eq!(agent.session, sid);
-        assert_eq!(agent.role, AgentRole::Orchestrator);
-        assert_eq!(agent.parent, None);
-        assert_eq!(
-            agent.workspace,
-            Workspace::Directory {
-                path: "/src/loja".into()
-            }
-        );
-        assert!(agent.initial_prompt.unwrap().contains("login com e-mail"));
-    }
-
-    /// Agente sozinho numa pasta: uma sessão só dele, sem orquestrador; sem
-    /// tarefa, ele só abre (como uma conversa nova).
+    /// Um agente numa pasta: uma sessão só dele; a primeira mensagem é a
+    /// tarefa como foi escrita (as instruções de delegação vão escondidas,
+    /// pelo hub). Por padrão ele pode criar outros agentes.
     #[test]
     fn new_agent_gets_a_session_of_its_own() {
         let config = AppConfig::default();
         let folder = std::path::Path::new("/home/x/notas");
-        let (sid, aid, [create, spawn]) = new_agent(
-            folder,
-            &config.presets[0],
-            Some("  organize os PDFs  ".to_owned()),
-            false,
-            false,
-            TermSize::default(),
-        );
+        let spec = NewAgent::new(folder, Some("  organize os PDFs  ".to_owned()));
+        let (sid, aid, [create, spawn]) = new_agent(spec, &config.presets[0], TermSize::default());
         let Command::CreateSession {
             id,
             config: session,
@@ -237,13 +216,14 @@ mod tests {
         assert_eq!(id, sid);
         assert_eq!(session.name, "notas · organize os pdfs");
         assert_eq!(session.repo, folder);
+        assert_eq!(session.goal, "organize os PDFs");
         let Command::Spawn { id, config: agent } = spawn else {
             panic!("esperava Spawn");
         };
         assert_eq!(id, aid);
         assert_eq!(agent.name, "claude-code");
         assert_eq!(agent.session, sid);
-        assert_eq!(agent.role, AgentRole::Worker);
+        assert_eq!(agent.role, AgentRole::Orchestrator, "pode delegar");
         assert_eq!(agent.parent, None);
         assert_eq!(agent.initial_prompt.as_deref(), Some("organize os PDFs"));
         assert_eq!(
@@ -253,21 +233,31 @@ mod tests {
             }
         );
 
-        let (_, _, [create, spawn]) = new_agent(
-            folder,
-            &config.presets[1],
-            None,
-            true,
-            true,
-            TermSize::default(),
-        );
+        // Sem tarefa, sem delegar, num worktree e com navegador.
+        let spec = NewAgent {
+            delegate: false,
+            browser: true,
+            isolate: true,
+            ..NewAgent::new(folder, None)
+        };
+        let (_, _, [create, spawn]) = new_agent(spec, &config.presets[1], TermSize::default());
         assert!(matches!(create, Command::CreateSession { config, .. } if config.name == "notas"));
         let Command::Spawn { config: agent, .. } = spawn else {
             panic!("esperava Spawn");
         };
+        assert_eq!(agent.role, AgentRole::Worker);
         assert_eq!(agent.initial_prompt, None);
         assert!(agent.browser);
         assert!(matches!(agent.workspace, Workspace::Worktree { .. }));
+
+        // Um shell não tem o MCP: não delega mesmo pedindo.
+        let shell = config
+            .presets
+            .iter()
+            .find(|p| p.kind == AgentKind::Shell)
+            .unwrap();
+        let (_, _, [_, spawn]) = new_agent(NewAgent::new(folder, None), shell, TermSize::default());
+        assert!(matches!(spawn, Command::Spawn { config, .. } if config.role == AgentRole::Worker));
     }
 
     #[test]
@@ -311,6 +301,6 @@ mod tests {
         );
         assert_eq!(session_name("/r/blog".as_ref(), ""), "blog");
         let config = AppConfig::default();
-        assert_eq!(orchestrator_presets(&config).len(), 2);
+        assert_eq!(default_preset(&config).unwrap().kind, AgentKind::ClaudeCode);
     }
 }

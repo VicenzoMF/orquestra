@@ -68,9 +68,11 @@ pub struct CommandSpec {
 /// Traduz o pedido de spawn no comando de cada CLI:
 /// - Claude Code: `--session-id <id do agente>` (ou `--resume`, reabrindo),
 ///   `--mcp-config`, `--settings` (hooks de status), `--allowedTools
-///   mcp__orquestra` (orquestrador) e o prompt após `--`;
+///   mcp__orquestra` (orquestrador), `--append-system-prompt` (instruções) e
+///   o prompt após `--`;
 /// - Codex: `resume --last` (reabrindo), `-c mcp_servers.<nome>.*`, `-c
-///   notify=[…]`, notificações OSC 9 da TUI e o prompt após `--`;
+///   notify=[…]`, notificações OSC 9 da TUI, `-c developer_instructions`
+///   (instruções) e o prompt após `--`;
 /// - Shell/Custom: só o ambiente; o prompt vai para o PTY seguido de `\r`.
 ///
 /// Reabrindo (`Workspace::Restore`), a tarefa inicial não vai de novo: a
@@ -146,6 +148,10 @@ fn claude_args(req: &SpawnRequest, prompt: Option<&str>, resume: bool) -> Vec<St
         // `mcp__<servidor>` libera todas as ferramentas do servidor.
         args.push("--allowedTools".to_owned());
         args.push(format!("mcp__{}", conventions::MCP_SERVER_NAME));
+    }
+    if let Some(instructions) = &req.instructions {
+        args.push("--append-system-prompt".to_owned());
+        args.push(instructions.clone());
     }
     if let Some(prompt) = prompt {
         // `--mcp-config` e `--allowedTools` são variádicos: sem `--` o prompt
@@ -246,6 +252,9 @@ fn codex_args(req: &SpawnRequest, prompt: Option<&str>) -> Vec<String> {
     set("tui.notifications", "true".to_owned());
     set("tui.notification_method", toml_string("osc9"));
     set("tui.notification_condition", toml_string("always"));
+    if let Some(instructions) = &req.instructions {
+        set("developer_instructions", toml_string(instructions));
+    }
     if let Some(prompt) = prompt {
         args.push("--".to_owned());
         args.push(prompt.to_owned());
@@ -372,6 +381,7 @@ mod tests {
             mcp_servers: Vec::new(),
             env: BTreeMap::new(),
             stop_hook: None,
+            instructions: None,
         }
     }
 
@@ -518,6 +528,41 @@ mod tests {
         assert_eq!(&spec.args[..2], ["--session-id", &req.id.to_string()]);
         assert_eq!(spec.args[2], "--settings");
         assert!(!spec.args.iter().any(|a| a == "--"));
+    }
+
+    /// As instruções de quem pode delegar vão no prompt de sistema, fora da
+    /// conversa: a primeira mensagem continua sendo só a tarefa.
+    #[test]
+    fn instructions_go_into_the_system_prompt_not_the_conversation() {
+        let mut req = request(AgentKind::ClaudeCode, "claude");
+        req.config.initial_prompt = Some("organize os PDFs".to_owned());
+        req.instructions = Some("You can delegate.".to_owned());
+        let spec = build_command(&req, Path::new("/w"));
+        let at = spec
+            .args
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .expect("--append-system-prompt");
+        assert_eq!(spec.args[at + 1], "You can delegate.");
+        assert_eq!(
+            &spec.args[spec.args.len() - 2..],
+            ["--", "organize os PDFs"]
+        );
+
+        req.config.kind = AgentKind::Codex;
+        let spec = build_command(&req, Path::new("/w"));
+        assert!(
+            spec.args
+                .contains(&"developer_instructions=\"You can delegate.\"".to_owned())
+        );
+        assert_eq!(
+            &spec.args[spec.args.len() - 2..],
+            ["--", "organize os PDFs"]
+        );
+
+        req.config.kind = AgentKind::Shell;
+        let spec = build_command(&req, Path::new("/w"));
+        assert!(!spec.args.iter().any(|a| a.contains("You can delegate")));
     }
 
     /// Reabrindo: a conversa é retomada pelo id do agente (Claude Code) ou a

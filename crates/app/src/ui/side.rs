@@ -24,7 +24,8 @@ pub fn show(
         widgets::status_icon(ui, kind, 16.0);
         let title = if agent.is_orchestrator() {
             format!(
-                "orquestrador · {}",
+                "{} · {}",
+                agent.config.name,
                 cx.model
                     .session(agent.config.session)
                     .map_or("", |s| s.config.name.as_str())
@@ -56,12 +57,9 @@ pub fn show(
         ui.label(RichText::new(agent.status_text()).color(theme::status_color(kind)));
         if let Some(parent) = agent.config.parent.and_then(|p| cx.model.agent(p)) {
             ui.label(RichText::new("·").color(theme::TEXT_DIM));
-            let who = if parent.is_orchestrator() {
-                "orquestrador".to_owned()
-            } else {
-                parent.config.name.clone()
-            };
-            ui.label(RichText::new(format!("criado por {who}")).color(theme::TEXT_DIM));
+            ui.label(
+                RichText::new(format!("criado por {}", parent.config.name)).color(theme::TEXT_DIM),
+            );
         } else if !agent.is_orchestrator() {
             ui.label(RichText::new("· avulso").color(theme::TEXT_DIM));
         }

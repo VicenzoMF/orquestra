@@ -8,7 +8,7 @@ use orquestra_core::folder;
 
 use crate::instance::OpenRequest;
 
-pub const USAGE: &str = "uso: orq [pasta] [-g <objetivo>] [--foreground]
+pub const USAGE: &str = "uso: orq [pasta] [-g <tarefa>] [--foreground]
        orq --mock
        orq mcp         ponte stdio do MCP `orquestra` (chamada pelo CLI do orquestrador)
        orq hook stop   hook Stop do orquestrador Claude Code
@@ -16,7 +16,7 @@ pub const USAGE: &str = "uso: orq [pasta] [-g <objetivo>] [--foreground]
   pasta               abre essa pasta (ex.: `orq .`; num repositório git, a
                       raiz dele): sem objetivo, no rascunho do canvas; se o
                       app já estiver aberto, nele
-  -g, --goal          já começa a orquestração com esse objetivo (pasta: `.`)
+  -g, --goal          já abre um agente com essa tarefa (pasta: `.`)
   --foreground        não se desprende do terminal (logs aqui)
   --mock              serviços simulados: a UI sem agentes reais";
 

@@ -52,11 +52,12 @@ impl OrquestraBridge {
     }
 
     #[tool(
-        description = "Lista os agentes desta orquestração (inclusive você): nome, id curto, tipo, \
-        papel, status, quem criou (parent), porta do navegador e um resumo da tarefa. Status: \
-        pending/starting (subindo), queued (fila por limite de agentes simultâneos), \
-        awaiting_approval (esperando o humano aprovar), running (trabalhando), waiting_for_input \
-        (parou e espera resposta: em geral terminou a tarefa ou tem uma pergunta), done, failed."
+        description = "Lists the agents in this session (including you): name, short id, kind, \
+        role, status, who created it (parent), browser port and a summary of the task. \
+        Status: pending/starting (starting up), queued (waiting for a free slot), \
+        awaiting_approval (waiting for the human to approve), running (working), \
+        waiting_for_input (stopped and waiting for an answer: usually done with the task or \
+        has a question), done, failed."
     )]
     async fn list_agents(&self) -> std::result::Result<String, String> {
         self.forward(method::LIST_AGENTS, json!({}))
@@ -65,14 +66,14 @@ impl OrquestraBridge {
     }
 
     #[tool(
-        description = "Cria um agente (Claude Code ou Codex) já com uma tarefa. Ele trabalha num \
-        git worktree e branch próprios (workspace \"worktree\", o padrão numa pasta git) ou \
-        direto numa pasta (workspace \"pasta\"; dir escolhe outra pasta que não a da sessão). \
-        Ele começa a trabalhar sozinho; acompanhe com wait_for e read_output. Escreva a tarefa \
-        completa e autocontida: o agente não vê esta conversa. Retorna nome, id, pasta, \
-        workspace e status inicial: starting; queued se o limite de agentes simultâneos foi \
-        atingido (sobe sozinho quando abrir vaga); awaiting_approval se a sessão exige que o \
-        humano aprove."
+        description = "Creates an agent (Claude Code or Codex) with a task. It works in its own \
+        git worktree and branch (workspace \"worktree\", the default in a git folder) or \
+        directly in a folder (workspace \"folder\"; dir picks a folder other than the \
+        session's). It starts working on its own; follow it with wait_for and read_output. \
+        Write the task in full and self-contained: the agent does not see this conversation. \
+        Returns name, id, folder, workspace and the initial status: starting; queued if the \
+        limit of simultaneous agents was reached (it starts when a slot frees up); \
+        awaiting_approval if the session requires the human to approve."
     )]
     async fn spawn_agent(
         &self,
@@ -84,9 +85,10 @@ impl OrquestraBridge {
     }
 
     #[tool(
-        description = "Digita texto no terminal de um agente seu e, por padrão, aperta Enter. Use \
-        para responder uma pergunta, escolher uma opção de um pedido de permissão (ex.: \"1\" ou \
-        \"y\") ou dar a próxima instrução. Leia a tela com read_output antes de responder."
+        description = "Types text into the terminal of one of your agents and, by default, \
+        presses Enter. Use it to answer a question, pick an option of a permission prompt \
+        (e.g. \"1\" or \"y\") or give the next instruction. Read the screen with read_output \
+        before answering."
     )]
     async fn send_input(
         &self,
@@ -98,8 +100,8 @@ impl OrquestraBridge {
     }
 
     #[tool(
-        description = "Mostra as últimas linhas da tela do terminal de um agente, em texto puro. \
-        Use para ver o que ele está fazendo, o que perguntou ou o resumo final do trabalho."
+        description = "Shows the last lines of an agent's terminal screen, as plain text. Use it \
+        to see what it is doing, what it asked or its final summary."
     )]
     async fn read_output(
         &self,
@@ -111,14 +113,14 @@ impl OrquestraBridge {
     }
 
     #[tool(
-        description = "Bloqueia até agentes seus satisfazerem uma condição, ou até o timeout; use \
-        em vez de chamar list_agents em loop. until: \"idle\" (parou: aguardando input, terminou \
-        ou falhou; o caso comum para saber que alguém acabou a tarefa), \"done\" (processo \
-        encerrado), \"attention\" (precisa de você: input, aprovação ou falha; ou terminou), \
-        \"change\" (qualquer mudança de status). Sem `agents`, observa todos os seus filhos e \
-        volta no próximo evento (quem já estava na condição só conta se mudar de novo). Com \
-        all=true, espera todos. Retorna triggered (quem disparou), o status de cada um e \
-        timed_out."
+        description = "Blocks until your agents meet a condition, or until the timeout; use it \
+        instead of calling list_agents in a loop. until: \"idle\" (stopped: waiting for \
+        input, done or failed; the usual way to know someone finished), \"done\" (process \
+        ended), \"attention\" (needs you: input, approval or failure; or finished), \
+        \"change\" (any status change). Without `agents`, it watches all your children and \
+        returns on the next event (those already in the condition only count if they change \
+        again). With all=true, it waits for all of them. Returns triggered (who fired), each \
+        one's status and timed_out."
     )]
     async fn wait_for(
         &self,
@@ -130,8 +132,8 @@ impl OrquestraBridge {
     }
 
     #[tool(
-        description = "Encerra o processo de um agente seu (SIGTERM, depois SIGKILL). O worktree \
-        e a branch ficam. Use quando a tarefa foi abandonada ou o agente travou."
+        description = "Ends the process of one of your agents (SIGTERM, then SIGKILL). The \
+        worktree and branch stay. Use it when the task was abandoned or the agent is stuck."
     )]
     async fn kill_agent(
         &self,
@@ -146,12 +148,12 @@ impl OrquestraBridge {
 #[tool_handler(
     router = self.tool_router,
     name = "orquestra",
-    instructions = "Ferramentas do orquestra para coordenar os agentes de código desta \
-    orquestração. Fluxo típico: divida o objetivo em tarefas independentes; spawn_agent para \
-    cada uma; wait_for(until=\"idle\") para saber quem parou; read_output para ver o resultado \
-    ou a pergunta; send_input para responder ou dar a próxima instrução; kill_agent para \
-    encerrar. Cada agente trabalha num worktree e branch próprios (pastas git) ou direto \
-    numa pasta, conforme o spawn_agent."
+    instructions = "orquestra tools to create and coordinate other coding agents from this \
+    session. Typical flow: split the work into independent tasks; spawn_agent for each one; \
+    wait_for(until=\"idle\") to know who stopped; read_output to see the result or the \
+    question; send_input to answer or give the next instruction; kill_agent to stop one. \
+    Each agent works in its own git worktree and branch (git folders) or directly in a \
+    folder, as chosen in spawn_agent."
 )]
 impl ServerHandler for OrquestraBridge {}
 

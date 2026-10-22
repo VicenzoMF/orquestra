@@ -65,18 +65,11 @@ pub fn top_bar(
             }
             ui.add_space(4.0);
             if ui
-                .add(widgets::accent_button("+ Nova orquestração"))
+                .add(widgets::accent_button("+ Novo agente"))
                 .on_hover_text("Abre um rascunho no canvas (Ctrl+Shift+N)")
                 .clicked()
             {
                 canvas.open_draft(cx.config);
-            }
-            if ui
-                .button("+ Novo agente")
-                .on_hover_text("Um agente só, numa pasta qualquer, como uma conversa")
-                .clicked()
-            {
-                canvas.open_agent_draft(cx.config);
             }
         });
     });

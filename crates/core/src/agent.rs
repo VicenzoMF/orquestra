@@ -259,4 +259,8 @@ pub struct SpawnRequest {
     /// lugar do hook de status padrão. É por ele que as novidades dos agentes
     /// chegam ao orquestrador quando ele termina um turno.
     pub stop_hook: Option<String>,
+    /// Instruções escondidas para o modelo: entram no prompt de sistema, fora
+    /// da conversa (Claude Code: `--append-system-prompt`; Codex: `-c
+    /// developer_instructions`). Quem pode criar agentes recebe aqui como.
+    pub instructions: Option<String>,
 }

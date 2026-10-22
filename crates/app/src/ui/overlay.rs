@@ -172,7 +172,7 @@ fn orchestrations(
                 }
                 hint(
                     ui,
-                    "Botão direito no canvas ou Ctrl+Shift+N: novo orquestrador\nCtrl+Shift+↑/↓ agente · Ctrl+Shift+B navegador",
+                    "Botão direito no canvas ou Ctrl+Shift+N: novo agente\nCtrl+Shift+↑/↓ agente · Ctrl+Shift+B navegador",
                 );
             });
         }
@@ -369,8 +369,8 @@ fn session_card(
     }
     if let Some(orq) = session.orchestrator
         && ui
-            .put(button(x + 78.0, 100.0), small("Orquestrador"))
-            .on_hover_text("Abre o terminal do orquestrador")
+            .put(button(x + 78.0, 100.0), small("Agente"))
+            .on_hover_text("Abre o terminal do agente que coordena a sessão")
             .clicked()
     {
         st.select(orq);
@@ -390,7 +390,7 @@ fn session_card(
 
 // --- Precisa de você -------------------------------------------------------
 
-/// A fila do modelo, mais o orquestrador que espera os filhos mas tem uma
+/// A fila do modelo, mais o agente que espera os filhos mas tem uma
 /// pergunta de sim/não na tela (o modelo não vê a tela).
 fn attention_items(cx: &Ctx) -> Vec<Attention> {
     let mut items = Vec::new();
@@ -502,12 +502,11 @@ fn attention_card(
             };
             ui.horizontal(|ui| {
                 widgets::status_icon(ui, kind, 14.0);
-                let name = if agent.is_orchestrator() {
-                    "orquestrador"
-                } else {
-                    agent.config.name.as_str()
-                };
-                ui.label(RichText::new(name).strong().color(theme::TEXT));
+                ui.label(
+                    RichText::new(&agent.config.name)
+                        .strong()
+                        .color(theme::TEXT),
+                );
                 let painter = ui.painter().clone();
                 let font = FontId::proportional(12.0);
                 let max = ui.available_width();

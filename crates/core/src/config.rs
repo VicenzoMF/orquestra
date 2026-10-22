@@ -143,17 +143,19 @@ impl Default for NotificationConfig {
     }
 }
 
-/// Limites e o prompt dos orquestradores.
+/// Limites e as instruções de quem pode criar agentes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OrchestrationConfig {
-    /// Workers vivos ao mesmo tempo, somando todas as sessões. Acima disso o
-    /// spawn espera na fila (`Queued { Capacity }`). Orquestradores não contam.
+    /// Agentes criados por outros, vivos ao mesmo tempo, somando todas as
+    /// sessões. Acima disso o spawn espera na fila (`Queued { Capacity }`).
+    /// Os que você abre não contam.
     pub max_concurrent_workers: u32,
-    /// Preset usado para orquestradores quando a UI não escolhe outro.
+    /// Tipo padrão de um agente novo.
     pub orchestrator_preset: String,
-    /// Prompt inicial do orquestrador. Placeholders: `{goal}`, `{repo}`, `{name}`.
-    pub orchestrator_prompt: String,
+    /// Instruções escondidas (no prompt de sistema, fora da conversa) de um
+    /// agente que pode criar outros. Placeholders: `{folder}`, `{name}`.
+    pub delegation_prompt: String,
 }
 
 impl Default for OrchestrationConfig {
@@ -161,52 +163,40 @@ impl Default for OrchestrationConfig {
         Self {
             max_concurrent_workers: 8,
             orchestrator_preset: "Claude Code".to_owned(),
-            orchestrator_prompt: DEFAULT_ORCHESTRATOR_PROMPT.to_owned(),
+            delegation_prompt: DEFAULT_DELEGATION_PROMPT.to_owned(),
         }
     }
 }
 
 impl OrchestrationConfig {
-    /// Prompt ainda igual a um padrão antigo (gravado por extenso no
-    /// `config.toml`) vira o padrão atual; um prompt editado fica.
-    pub fn upgrade(&mut self) {
-        if PREVIOUS_ORCHESTRATOR_PROMPTS.contains(&self.orchestrator_prompt.as_str()) {
-            self.orchestrator_prompt = DEFAULT_ORCHESTRATOR_PROMPT.to_owned();
-        }
-    }
-
-    pub fn render_prompt(&self, session: &SessionConfig) -> String {
-        self.orchestrator_prompt
-            .replace("{goal}", &session.goal)
-            .replace("{repo}", &session.repo.display().to_string())
+    /// As instruções de delegação para um agente desta sessão.
+    pub fn render_delegation(&self, session: &SessionConfig) -> String {
+        self.delegation_prompt
+            .replace("{folder}", &session.repo.display().to_string())
             .replace("{name}", &session.name)
     }
 }
 
-const DEFAULT_ORCHESTRATOR_PROMPT: &str = "\
-Você é o orquestrador da sessão \"{name}\" do orquestra. Objetivo: {goal}
+/// Vai para o modelo, não para a pessoa: em inglês, como o resto do que só o
+/// modelo lê (instruções e ferramentas do MCP).
+const DEFAULT_DELEGATION_PROMPT: &str = "\
+You are running inside orquestra, in a session whose folder is {folder}. \
+Besides your usual tools, you have the `orquestra` MCP server, which creates \
+other agents (Claude Code or Codex) that work in parallel with you: \
+spawn_agent, list_agents, send_input, read_output, wait_for and kill_agent.
 
-Você coordena; delegue o trabalho aos agentes em vez de fazê-lo. Pelo MCP \
-`orquestra` você cria e acompanha agentes: spawn_agent, list_agents, send_input, \
-read_output, wait_for e kill_agent. A pasta da sessão é {repo}. Para cada \
-agente, escolha onde ele trabalha: num git worktree e branch próprios \
-(workspace \"worktree\", o padrão numa pasta git) quando vai mudar código, ou \
-direto numa pasta (workspace \"pasta\", e dir para outra pasta da máquina) \
-para pesquisar, ler, organizar arquivos ou trabalhar fora de um repositório; \
-agentes na mesma pasta podem se atropelar, então dê a cada um arquivos \
-diferentes. Divida o objetivo em tarefas independentes, uma por agente, \
-acompanhe com wait_for e read_output, responda quando um agente travar e, no \
-fim, resuma o que cada um entregou.";
+Do small or sequential work yourself. Delegate when the work splits into \
+independent parts that benefit from running in parallel, or when one part is \
+big enough to deserve an agent of its own.
 
-/// Padrões anteriores, para `OrchestrationConfig::upgrade`.
-const PREVIOUS_ORCHESTRATOR_PROMPTS: &[&str] = &["\
-Você é o orquestrador da sessão \"{name}\" do orquestra. Objetivo: {goal}
-
-Você coordena; não edite código. Pelo MCP `orquestra` você cria e acompanha \
-agentes, cada um num git worktree próprio de {repo}: spawn_agent, list_agents, \
-send_input, read_output, wait_for e kill_agent. Divida o objetivo em tarefas \
-independentes, uma por agente, acompanhe com wait_for e read_output, responda \
-quando um agente travar e, no fim, resuma o que cada branch entrega."];
+When you delegate:
+- write each task in full: the agent does not see this conversation;
+- in a git folder, use workspace \"worktree\" for agents that will change \
+code, so they do not step on each other;
+- use workspace \"folder\" (with dir, if it is another folder) to research \
+or work on files outside a repository;
+- follow up with wait_for and read_output and, at the end, put together what \
+each agent delivered.";
 
 /// Modelo de agente oferecido na UI e usado pelo `spawn_agent` do MCP.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -292,35 +282,18 @@ mod tests {
         assert_eq!(cfg.presets, AgentPreset::defaults());
     }
 
-    /// Quem nunca mexeu no prompt (o `config.toml` o grava por extenso)
-    /// ganha o padrão novo; quem editou, fica com o seu.
     #[test]
-    fn old_default_prompt_upgrades_but_edited_stays() {
-        let mut cfg = AppConfig::default();
-        cfg.orchestration.orchestrator_prompt = PREVIOUS_ORCHESTRATOR_PROMPTS[0].to_owned();
-        let text = toml::to_string_pretty(&cfg).unwrap();
-        let mut back: AppConfig = toml::from_str(&text).unwrap();
-        back.orchestration.upgrade();
-        assert_eq!(
-            back.orchestration.orchestrator_prompt,
-            DEFAULT_ORCHESTRATOR_PROMPT
-        );
-
-        let mut edited = OrchestrationConfig {
-            orchestrator_prompt: "Seja breve. {goal}".to_owned(),
-            ..OrchestrationConfig::default()
-        };
-        edited.upgrade();
-        assert_eq!(edited.orchestrator_prompt, "Seja breve. {goal}");
-    }
-
-    #[test]
-    fn orchestrator_prompt_fills_placeholders() {
+    fn delegation_prompt_fills_the_folder() {
         let session = SessionConfig::new("loja", "/src/loja", "login com e-mail");
-        let prompt = OrchestrationConfig::default().render_prompt(&session);
-        assert!(prompt.contains("\"loja\""));
-        assert!(prompt.contains("Objetivo: login com e-mail"));
-        assert!(prompt.contains("/src/loja"));
+        let prompt = OrchestrationConfig::default().render_delegation(&session);
+        assert!(prompt.contains("whose folder is /src/loja."));
         assert!(!prompt.contains('{'));
+        // A tarefa vai na conversa, não aqui.
+        assert!(!prompt.contains("login com e-mail"));
+        // O nome antigo do campo (o prompt visível) é ignorado.
+        let cfg: AppConfig =
+            toml::from_str("[orchestration]\norchestrator_prompt = \"Você é o orquestrador\"\n")
+                .unwrap();
+        assert_eq!(cfg.orchestration, OrchestrationConfig::default());
     }
 }

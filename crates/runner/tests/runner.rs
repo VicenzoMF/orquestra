@@ -49,6 +49,7 @@ fn request(kind: AgentKind, program: &str, args: &[&str], workspace: Workspace) 
         mcp_servers: Vec::new(),
         env: BTreeMap::new(),
         stop_hook: None,
+        instructions: None,
     }
 }
 

@@ -62,7 +62,9 @@ impl From<Result<Value, String>> for Response {
 }
 
 // ---------------------------------------------------------------------------
-// Parâmetros (também são o schema das ferramentas MCP)
+// Parâmetros (também são o schema das ferramentas MCP). Os doc comments dos
+// campos viram a descrição no schema, que o modelo lê: por isso em inglês,
+// como as instruções e as descrições das ferramentas.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -70,49 +72,53 @@ pub struct ListAgentsParams {}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SpawnAgentParams {
-    /// Nome curto e único na sessão (vira parte da branch), ex.: "api-login".
-    /// Se já existir, o orquestra acrescenta um sufixo (-2, -3...).
+    /// Short name, unique in the session (part of the branch name), e.g.
+    /// "api-login". If taken, orquestra adds a suffix (-2, -3...).
     pub name: String,
-    /// Tarefa completa e autocontida para o agente: ele não vê esta conversa.
-    /// Diga o que fazer, onde, critérios de pronto e o que não mexer.
+    /// Full, self-contained task for the agent: it does not see this
+    /// conversation. Say what to do, where, what done means and what not to
+    /// touch.
     pub task: String,
-    /// Tipo do agente: "claude" ou "codex" (ou o nome de um preset). Padrão:
-    /// o primeiro tipo permitido na sessão.
+    /// Agent kind: "claude" or "codex" (or a preset name). Default: the first
+    /// kind allowed in the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    /// Dá ao agente um Chromium próprio, controlável por MCP. Padrão: o do preset.
+    /// Gives the agent its own Chromium, controllable via MCP. Default: the
+    /// preset's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser: Option<bool>,
-    /// Onde o agente trabalha: "worktree" (um git worktree e uma branch só
-    /// dele: para mudar código sem atrapalhar os outros) ou "pasta" (direto
-    /// na pasta: para pesquisar, ler, organizar arquivos ou trabalhar fora de
-    /// um repositório; agentes na mesma pasta podem se atropelar). Padrão:
-    /// "worktree" se a pasta for um repositório git, senão "pasta".
+    /// Where the agent works: "worktree" (a git worktree and branch of its
+    /// own: to change code without disturbing the others) or "folder"
+    /// (directly in the folder: to research, read, organize files or work
+    /// outside a repository; agents in the same folder can step on each
+    /// other). Default: "worktree" if the folder is a git repository, else
+    /// "folder".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
-    /// Pasta de trabalho, se não for a da sessão: absoluta, "~/..." ou
-    /// relativa à pasta da sessão.
+    /// Working folder, if not the session's: absolute, "~/..." or relative to
+    /// the session folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SendInputParams {
-    /// Nome do agente (ou id curto).
+    /// Agent name (or short id).
     pub agent: String,
-    /// Texto a digitar no terminal do agente. É enviado como está: para teclas
-    /// especiais use escapes (ex.: "\u001b" para Esc). Vazio + submit = só Enter.
+    /// Text to type into the agent's terminal. Sent as is: for special keys
+    /// use escapes (e.g. "\u001b" for Esc). Empty + submit = just Enter.
     pub text: String,
-    /// Aperta Enter depois do texto.
+    /// Press Enter after the text.
     #[serde(default = "yes")]
     pub submit: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadOutputParams {
-    /// Nome do agente (ou id curto).
+    /// Agent name (or short id).
     pub agent: String,
-    /// Quantas linhas não vazias do fim da tela devolver (1 a 500).
+    /// How many non-empty lines from the end of the screen to return (1 to
+    /// 500).
     #[serde(default = "default_lines")]
     pub lines: usize,
 }
@@ -136,25 +142,25 @@ pub enum WaitUntil {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct WaitForParams {
-    /// Agentes a observar (nomes ou ids curtos). Padrão: todos os seus filhos;
-    /// nesse caso, quem já estava na condição só conta se mudar de novo.
+    /// Agents to watch (names or short ids). Default: all your children; then
+    /// those already in the condition only count if they change again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<Vec<String>>,
-    /// "idle" (parou: aguardando input, terminou ou falhou), "done" (processo
-    /// encerrado), "attention" (precisa de você ou terminou) ou "change"
-    /// (qualquer mudança de status).
+    /// "idle" (stopped: waiting for input, done or failed), "done" (process
+    /// ended), "attention" (needs you, or finished) or "change" (any status
+    /// change).
     pub until: WaitUntil,
-    /// Espera máxima em segundos (0 a 3600).
+    /// Maximum wait in seconds (0 to 3600).
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
-    /// true: espera todos os agentes satisfazerem a condição; false: o primeiro.
+    /// true: wait until all agents meet the condition; false: the first one.
     #[serde(default)]
     pub all: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct KillAgentParams {
-    /// Nome do agente (ou id curto).
+    /// Agent name (or short id).
     pub agent: String,
 }
 

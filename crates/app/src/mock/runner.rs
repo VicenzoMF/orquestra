@@ -528,6 +528,7 @@ mod tests {
             mcp_servers: Vec::new(),
             env: BTreeMap::new(),
             stop_hook: None,
+            instructions: None,
         }
     }
 
