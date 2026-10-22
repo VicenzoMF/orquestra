@@ -1,14 +1,20 @@
 [package]
 name = "orquestra-app"
-description = "Binário `orquestra`: a UI egui e os subcomandos `mcp` e `hook stop`."
+description = "Binário `orq` (como o `code .`): a UI egui e os subcomandos `mcp` e `hook stop`."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+default-run = "orq"
 
 [[bin]]
-name = "orquestra"
+name = "orq"
 path = "src/main.rs"
+
+# Nome completo: só repassa os argumentos para o `orq` ao lado.
+[[bin]]
+name = "orquestra"
+path = "src/bin/orquestra.rs"
 
 [dependencies]
 orquestra-core.workspace = true
@@ -25,10 +31,12 @@ egui.workspace = true
 eframe.workspace = true
 alacritty_terminal.workspace = true
 image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+nix = { version = "0.28", default-features = false, features = ["process", "user"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-serde_json.workspace = true
 
 [features]
 # Só para desenvolvimento: ganchos que tiram um screenshot PNG e fecham

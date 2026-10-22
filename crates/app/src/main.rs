@@ -1,37 +1,29 @@
-//! Binário `orquestra`: a UI e os subcomandos que os agentes chamam.
-//! Ver `docs/ARCHITECTURE.md` §2 e §4.6.
+//! Binário `orq`: abre a UI como o `code .` e atende os subcomandos que os
+//! agentes chamam. Ver `docs/ARCHITECTURE.md` §2 e §4.6.
 
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::fs::File;
+use std::path::Path;
+use std::process::{ExitCode, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, anyhow, bail};
-use orquestra_app::actions;
+use anyhow::{Context as _, anyhow};
 use orquestra_app::backend::{self, Backend};
+use orquestra_app::cli::{USAGE, UiArgs};
 use orquestra_app::feed::Shared;
+use orquestra_app::instance::{self, Instance, OpenRequest};
 use orquestra_app::mock::NullStore;
 use orquestra_app::ui::OrquestraApp;
 use orquestra_browser::Chromium;
-use orquestra_core::{AppConfig, Command, Services, SessionConfig, Store, TermSize};
+use orquestra_core::{AppConfig, Command, Services, Store};
 use orquestra_mcp::McpGateway;
 use orquestra_runner::Runner;
 use orquestra_store::{DesktopNotifier, SqliteStore};
 use tracing::{info, warn};
 
-const USAGE: &str = "uso: orquestra [--mock] [--repo <dir> --goal <objetivo>]
-       orquestra mcp         ponte stdio do MCP `orquestra` (chamada pelo CLI do orquestrador)
-       orquestra hook stop   hook Stop do orquestrador Claude Code
-
-  --mock              serviços simulados: a UI sem agentes reais
-  --repo, --goal      já abre uma orquestração nesse repositório com esse objetivo";
-
-#[derive(Default)]
-struct UiArgs {
-    mock: bool,
-    repo: Option<PathBuf>,
-    goal: Option<String>,
-}
+const LOG_FILTER: &str = "info,eframe=warn,egui_glow=warn,egui_winit=warn,winit=warn";
+/// Quanto esperar por uma instância que está subindo agora.
+const HANDOFF_WAIT: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {
     let started = Instant::now();
@@ -53,38 +45,99 @@ fn main() -> ExitCode {
         }
         _ => {}
     }
-    let ui_args = match parse_ui_args(&args) {
+    let ui_args = match UiArgs::parse(&args) {
         Ok(a) => a,
         Err(err) => {
-            eprintln!("{err}\n\n{USAGE}");
+            eprintln!("orq: {err:#}\n\n{USAGE}");
             return ExitCode::from(2);
         }
     };
-    init_tracing("info,eframe=warn,egui_glow=warn,egui_winit=warn,winit=warn");
-    match run(ui_args, started) {
+    let request = match ui_args.request() {
+        Ok(r) => r,
+        Err(err) => {
+            eprintln!("orq: {err:#}");
+            return ExitCode::from(2);
+        }
+    };
+    match launch(&ui_args, request, started) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("orquestra: {err:#}");
+            eprintln!("orq: {err:#}");
             ExitCode::FAILURE
         }
     }
 }
 
-fn parse_ui_args(args: &[String]) -> anyhow::Result<UiArgs> {
-    let mut out = UiArgs::default();
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--mock" => out.mock = true,
-            "--repo" => out.repo = Some(it.next().context("--repo sem valor")?.into()),
-            "--goal" => out.goal = Some(it.next().context("--goal sem valor")?.clone()),
-            other => bail!("argumento desconhecido: {other}"),
+/// Como o `code .`: entrega o pedido à janela aberta ou abre uma nova,
+/// desprendida do terminal (a não ser com `--foreground`).
+fn launch(args: &UiArgs, request: OpenRequest, started: Instant) -> anyhow::Result<()> {
+    if args.mock {
+        // Demonstração: sempre no terminal e fora da instância única.
+        init_tracing(LOG_FILTER);
+        return run(true, started, None, request);
+    }
+    let dir = instance::default_dir().context("diretório do socket da instância")?;
+    if args.detached {
+        // Sessão própria: fechar o terminal de onde veio não derruba o app.
+        let _ = nix::unistd::setsid();
+    } else {
+        if instance::send(&dir, &request).is_ok() {
+            return Ok(());
+        }
+        if !args.foreground {
+            return detach(&request);
         }
     }
-    if out.repo.is_some() != out.goal.is_some() {
-        bail!("--repo e --goal andam juntos");
+    let Some(instance) = Instance::claim(&dir).context("instância única")? else {
+        // Outra instância está subindo agora: entrega a ela.
+        return hand_off(&dir, &request);
+    };
+    init_tracing(LOG_FILTER);
+    run(false, started, Some(instance), request)
+}
+
+/// Sobe a UI noutro processo, com a saída no log, e devolve o terminal.
+fn detach(request: &OpenRequest) -> anyhow::Result<()> {
+    let exe = std::env::current_exe().context("caminho do executável")?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--detached");
+    if let Some(repo) = &request.repo {
+        cmd.arg(repo);
     }
-    Ok(out)
+    if let Some(goal) = &request.goal {
+        cmd.args(["--goal", goal]);
+    }
+    let log = log_file();
+    let out = match &log {
+        Some(file) => Stdio::from(file.try_clone()?),
+        None => Stdio::null(),
+    };
+    let err = log.map_or_else(Stdio::null, Stdio::from);
+    cmd.stdin(Stdio::null())
+        .stdout(out)
+        .stderr(err)
+        .spawn()
+        .context("abrir a janela")?;
+    Ok(())
+}
+
+/// `<dados>/orquestra.log`, recomeçado a cada abertura.
+fn log_file() -> Option<File> {
+    let (db, _) = SqliteStore::default_paths()?;
+    let dir = db.parent()?;
+    std::fs::create_dir_all(dir).ok()?;
+    File::create(dir.join("orquestra.log")).ok()
+}
+
+fn hand_off(dir: &Path, request: &OpenRequest) -> anyhow::Result<()> {
+    let deadline = Instant::now() + HANDOFF_WAIT;
+    loop {
+        match instance::send(dir, request) {
+            Ok(()) => return Ok(()),
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            Err(err) => return Err(err).context("o orquestra já está abrindo, mas não respondeu"),
+        }
+    }
 }
 
 /// Logs sempre no stderr: em `mcp` e `hook` o stdout é do protocolo.
@@ -105,20 +158,25 @@ fn run_mcp() -> ExitCode {
     {
         Ok(rt) => rt,
         Err(err) => {
-            eprintln!("orquestra mcp: {err}");
+            eprintln!("orq mcp: {err}");
             return ExitCode::FAILURE;
         }
     };
     match runtime.block_on(orquestra_mcp::run_stdio_bridge()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("orquestra mcp: {err}");
+            eprintln!("orq mcp: {err}");
             ExitCode::FAILURE
         }
     }
 }
 
-fn run(args: UiArgs, started: Instant) -> anyhow::Result<()> {
+fn run(
+    mock: bool,
+    started: Instant,
+    mut instance: Option<Instance>,
+    request: OpenRequest,
+) -> anyhow::Result<()> {
     // Poucas threads: o trabalho pesado é dos agentes, não do app.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -126,9 +184,9 @@ fn run(args: UiArgs, started: Instant) -> anyhow::Result<()> {
         .enable_all()
         .build()?;
 
-    let (config, backend) = if args.mock {
+    let (config, backend) = if mock {
         let config = NullStore.load_config()?;
-        let backend = backend::start_mock(runtime.handle(), &config, 1.0, args.repo.is_none())?;
+        let backend = backend::start_mock(runtime.handle(), &config, 1.0, request.repo.is_none())?;
         (config, backend)
     } else {
         start_real(&runtime)?
@@ -154,11 +212,17 @@ fn run(args: UiArgs, started: Instant) -> anyhow::Result<()> {
         frames,
         cmd.clone(),
         shared.clone(),
-        repaint,
+        repaint.clone(),
     );
 
-    if let (Some(repo), Some(goal)) = (args.repo, args.goal) {
-        start_orchestration(&config, &cmd, repo, goal)?;
+    // O pedido desta execução e os que vierem de outros `orq`.
+    shared.push_open(request, false);
+    if let Some(instance) = instance.as_mut() {
+        let shared = shared.clone();
+        instance.serve(move |request| {
+            shared.push_open(request, true);
+            repaint();
+        })?;
     }
 
     let options = eframe::NativeOptions {
@@ -183,7 +247,8 @@ fn run(args: UiArgs, started: Instant) -> anyhow::Result<()> {
         }),
     );
 
-    // Janela fechada: pede o shutdown e espera o hub por pouco tempo.
+    // Janela fechada: some do socket, pede o shutdown e espera o hub um pouco.
+    drop(instance);
     let _ = cmd.send(Command::Shutdown);
     let joined =
         runtime.block_on(async { tokio::time::timeout(Duration::from_secs(5), hub).await });
@@ -215,34 +280,6 @@ fn start_real(runtime: &tokio::runtime::Runtime) -> anyhow::Result<(AppConfig, B
         })
     })?;
     Ok((config, backend))
-}
-
-/// `--repo`/`--goal`: a mesma orquestração do diálogo "Nova orquestração".
-fn start_orchestration(
-    config: &AppConfig,
-    cmd: &orquestra_core::CommandSender,
-    repo: PathBuf,
-    goal: String,
-) -> anyhow::Result<()> {
-    let repo = repo
-        .canonicalize()
-        .with_context(|| format!("repositório {}", repo.display()))?;
-    let name = repo.file_name().map_or_else(
-        || "orquestração".to_owned(),
-        |n| n.to_string_lossy().into_owned(),
-    );
-    let preset = config
-        .presets
-        .iter()
-        .find(|p| p.name == config.orchestration.orchestrator_preset)
-        .or_else(|| config.presets.first())
-        .context("nenhum preset de agente na config")?;
-    let session = SessionConfig::new(name, repo, goal);
-    let (_, _, commands) = actions::new_orchestration(config, session, preset, TermSize::default());
-    for c in commands {
-        cmd.send(c).map_err(|_| anyhow!("hub parou"))?;
-    }
-    Ok(())
 }
 
 /// Registra quanto o app levou do `main` até o primeiro quadro.

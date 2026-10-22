@@ -11,12 +11,20 @@ mod side;
 mod widgets;
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use egui::{CentralPanel, Frame, Key, Modifiers, Panel, TextureHandle};
-use orquestra_core::{AgentId, AppConfig, Command, CommandSender, SessionId, TermSize};
+use egui::{
+    CentralPanel, Frame, Key, Modifiers, Panel, TextureHandle, UserAttentionType, ViewportCommand,
+};
+use orquestra_core::{
+    AgentId, AppConfig, Command, CommandSender, SessionConfig, SessionId, TermSize,
+};
+use tracing::warn;
 
+use crate::actions;
 use crate::feed::Shared;
+use crate::instance::OpenRequest;
 use crate::model::{BrowserState, Model};
 use crate::sysinfo::RamMeter;
 use crate::term::view::{TermFont, ViewState};
@@ -302,6 +310,9 @@ impl OrquestraApp {
         }
 
         let shared = self.shared.clone();
+        for (request, remote) in shared.take_opens() {
+            self.open(&ctx, request, remote);
+        }
         let model = shared.model();
         self.gc(&model);
         self.shortcuts(&ctx, &model);
@@ -377,20 +388,59 @@ impl OrquestraApp {
                     self.config = *config.clone();
                     let _ = self.cmd.send(Command::SaveConfig(config));
                 }
-                dialogs::Action::Created { session, repo } => {
-                    self.st.focus = None;
-                    self.canvas.request_fit();
-                    let _ = session;
-                    let recent = &mut self.config.recent_repos;
-                    recent.retain(|r| *r != repo);
-                    recent.insert(0, repo);
-                    recent.truncate(8);
-                    let _ = self
-                        .cmd
-                        .send(Command::SaveConfig(Box::new(self.config.clone())));
-                }
+                dialogs::Action::Created { repo } => self.created(repo),
             }
         }
+    }
+
+    /// Pedido do `orq`: abre o repositório (no diálogo, ou já a orquestração
+    /// quando veio com objetivo). Vindo de outro terminal, traz a janela para
+    /// a frente (no X11 isso também a restaura); no Wayland o compositor não
+    /// deixa, então ela pede atenção.
+    fn open(&mut self, ctx: &egui::Context, request: OpenRequest, remote: bool) {
+        if remote {
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+            ctx.send_viewport_cmd(ViewportCommand::RequestUserAttention(
+                UserAttentionType::Informational,
+            ));
+        }
+        let Some(repo) = request.repo else {
+            return;
+        };
+        let Some(goal) = request.goal.filter(|g| !g.trim().is_empty()) else {
+            self.dialogs.open_new_orchestration_in(&self.config, &repo);
+            return;
+        };
+        let Some(preset) = actions::default_orchestrator(&self.config) else {
+            warn!("nenhum preset pode orquestrar; abrindo o diálogo");
+            self.dialogs.open_new_orchestration_in(&self.config, &repo);
+            return;
+        };
+        let session = SessionConfig::new(
+            actions::session_name(&repo, &goal),
+            repo.clone(),
+            goal.trim(),
+        );
+        let (_, orchestrator, commands) =
+            actions::new_orchestration(&self.config, session, preset, self.st.spawn_size());
+        for c in commands {
+            let _ = self.cmd.send(c);
+        }
+        self.st.select_new(orchestrator);
+        self.created(repo);
+    }
+
+    /// Orquestração nova: o canvas reenquadra e o repositório vai para os recentes.
+    fn created(&mut self, repo: PathBuf) {
+        self.st.focus = None;
+        self.canvas.request_fit();
+        let recent = &mut self.config.recent_repos;
+        recent.retain(|r| *r != repo);
+        recent.insert(0, repo);
+        recent.truncate(8);
+        let _ = self
+            .cmd
+            .send(Command::SaveConfig(Box::new(self.config.clone())));
     }
 }
 
@@ -444,6 +494,72 @@ mod tests {
         };
         let mut out = ctx.run_ui(input, |ui| app.draw(ui));
         out.textures_delta.clear();
+    }
+
+    /// Pedidos do `orq`: sem objetivo, o diálogo abre já no repositório; com
+    /// objetivo, a orquestração começa e o repositório vai para os recentes.
+    #[test]
+    fn open_requests_from_orq() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let config = AppConfig::default();
+        let Backend {
+            bus: _bus,
+            cmd,
+            events,
+            frames,
+            hub,
+        } = backend::start_mock(runtime.handle(), &config, 0.02, false).unwrap();
+        let shared = Shared::new(8, 500);
+        backend::spawn_ui_feeds(
+            runtime.handle(),
+            events,
+            frames,
+            cmd.clone(),
+            shared.clone(),
+            Arc::new(|| {}),
+        );
+        let ctx = egui::Context::default();
+        let mut app = OrquestraApp::with_context(&ctx, cmd.clone(), shared.clone(), config);
+
+        let loja = OpenRequest {
+            repo: Some("/src/loja".into()),
+            goal: None,
+        };
+        shared.push_open(loja, true);
+        frame(&ctx, &mut app);
+        assert_eq!(app.dialogs.new_orchestration_repo(), Some("/src/loja"));
+        assert!(shared.model().sessions().is_empty());
+
+        app.dialogs = dialogs::Dialogs::default();
+        let blog = OpenRequest {
+            repo: Some("/src/blog".into()),
+            goal: Some("migrar para Astro".to_owned()),
+        };
+        shared.push_open(blog, false);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while shared.model().sessions().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "sessão não apareceu");
+            frame(&ctx, &mut app);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        {
+            let model = shared.model();
+            let session = &model.sessions()[0].config;
+            assert_eq!(session.repo, PathBuf::from("/src/blog"));
+            assert_eq!(session.goal, "migrar para Astro");
+        }
+        assert!(!app.dialogs.any_open());
+        assert_eq!(app.config.recent_repos[0], PathBuf::from("/src/blog"));
+
+        cmd.send(Command::Shutdown).unwrap();
+        runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(5), hub).await })
+            .expect("hub não encerrou")
+            .unwrap();
     }
 
     /// A UI inteira, sem janela, sobre o hub real com os mocks semeados:

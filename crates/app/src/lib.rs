@@ -4,8 +4,10 @@
 pub mod actions;
 pub mod backend;
 pub mod browser;
+pub mod cli;
 pub mod feed;
 pub mod fonts;
+pub mod instance;
 pub mod layout;
 pub mod mock;
 pub mod model;

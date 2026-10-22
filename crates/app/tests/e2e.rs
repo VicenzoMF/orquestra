@@ -490,8 +490,8 @@ async fn tres_agentes_navegador_e_orquestrador_via_mcp() {
         "ola do orquestrador"
     );
 
-    // A ponte stdio real (`orquestra mcp`) enxerga o mesmo estado.
-    let exe = env!("CARGO_BIN_EXE_orquestra");
+    // A ponte stdio real (`orq mcp`) enxerga o mesmo estado.
+    let exe = env!("CARGO_BIN_EXE_orq");
     let env = [
         ("ORQUESTRA_SOCKET", sock.as_str()),
         ("ORQUESTRA_TOKEN", token.as_str()),

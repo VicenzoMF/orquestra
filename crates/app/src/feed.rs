@@ -13,6 +13,7 @@ use tokio::time::Instant;
 use tracing::warn;
 
 use crate::browser::FrameStore;
+use crate::instance::OpenRequest;
 use crate::model::Model;
 use crate::term::{AgentTerm, Preview};
 
@@ -29,6 +30,9 @@ pub struct Shared {
     pub frames: Arc<FrameStore>,
     /// Scrollback dos terminais criados daqui em diante.
     scrollback: AtomicUsize,
+    /// Pedidos do `orq` para a janela, com `true` quando vieram de outro
+    /// processo (aí a janela pede atenção).
+    opens: Mutex<Vec<(OpenRequest, bool)>>,
 }
 
 impl Shared {
@@ -38,6 +42,7 @@ impl Shared {
             terms: Mutex::new(HashMap::new()),
             frames: Arc::new(FrameStore::default()),
             scrollback: AtomicUsize::new(scrollback),
+            opens: Mutex::new(Vec::new()),
         })
     }
 
@@ -51,6 +56,15 @@ impl Shared {
 
     pub fn term(&self, id: AgentId) -> Option<SharedTerm> {
         lock(&self.terms).get(&id).cloned()
+    }
+
+    /// Enfileira um pedido do `orq`; a UI o aplica no próximo frame.
+    pub fn push_open(&self, request: OpenRequest, remote: bool) {
+        lock(&self.opens).push((request, remote));
+    }
+
+    pub fn take_opens(&self) -> Vec<(OpenRequest, bool)> {
+        std::mem::take(&mut *lock(&self.opens))
     }
 
     /// Prévia do terminal do agente (vazia enquanto não há saída).

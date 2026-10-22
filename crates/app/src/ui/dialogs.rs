@@ -1,6 +1,6 @@
 //! Diálogos: nova orquestração, agente avulso, configurações e confirmações.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use egui::{ComboBox, DragValue, Id, Modal, RichText, TextEdit, Ui};
 use orquestra_core::{
@@ -15,7 +15,7 @@ use crate::theme;
 /// O que a App aplica depois do frame (mexe na config local).
 pub enum Action {
     SaveConfig(Box<AppConfig>),
-    Created { session: SessionId, repo: PathBuf },
+    Created { repo: PathBuf },
 }
 
 pub struct NewOrchestration {
@@ -27,6 +27,8 @@ pub struct NewOrchestration {
     kinds: Vec<(AgentKind, bool)>,
     browse: bool,
     approve: bool,
+    /// Põe o cursor no objetivo no próximo frame.
+    focus_goal: bool,
 }
 
 pub struct SoloAgent {
@@ -80,6 +82,12 @@ pub struct Dialogs {
 }
 
 impl Dialogs {
+    /// Repositório do diálogo de nova orquestração aberto, se houver.
+    #[cfg(test)]
+    pub fn new_orchestration_repo(&self) -> Option<&str> {
+        self.new_orch.as_ref().map(|d| d.repo.as_str())
+    }
+
     pub fn any_open(&self) -> bool {
         self.new_orch.is_some()
             || self.solo.is_some()
@@ -88,10 +96,7 @@ impl Dialogs {
     }
 
     pub fn open_new_orchestration(&mut self, config: &AppConfig) {
-        let preset = actions::orchestrator_presets(config)
-            .into_iter()
-            .find(|p| p.name == config.orchestration.orchestrator_preset)
-            .or_else(|| actions::orchestrator_presets(config).into_iter().next())
+        let preset = actions::default_orchestrator(config)
             .map(|p| p.name.clone())
             .unwrap_or_default();
         self.new_orch = Some(NewOrchestration {
@@ -111,7 +116,17 @@ impl Dialogs {
             ],
             browse: true,
             approve: false,
+            focus_goal: false,
         });
+    }
+
+    /// Nova orquestração já neste repositório (`orq <pasta>`): falta só o objetivo.
+    pub fn open_new_orchestration_in(&mut self, config: &AppConfig, repo: &Path) {
+        self.open_new_orchestration(config);
+        if let Some(d) = self.new_orch.as_mut() {
+            d.repo = repo.display().to_string();
+            d.focus_goal = true;
+        }
     }
 
     pub fn open_solo(&mut self, cx: &Ctx, st: &UiState) {
@@ -249,12 +264,15 @@ fn new_orchestration(
     });
 
     field_label(ui, "Objetivo");
-    ui.add(
+    let goal = ui.add(
         TextEdit::multiline(&mut d.goal)
             .hint_text("O que o orquestrador deve entregar")
             .desired_rows(3)
             .desired_width(f32::INFINITY),
     );
+    if std::mem::take(&mut d.focus_goal) {
+        goal.request_focus();
+    }
 
     field_label(ui, "Agentes simultâneos desta orquestração");
     ui.horizontal(|ui| {
@@ -315,16 +333,13 @@ fn new_orchestration(
                     d.goal.trim(),
                 )
             };
-            let (session_id, orchestrator, commands) =
+            let (_, orchestrator, commands) =
                 actions::new_orchestration(cx.config, session, preset, st.spawn_size());
             for c in commands {
                 cx.send(c);
             }
             st.select_new(orchestrator);
-            action = Some(Action::Created {
-                session: session_id,
-                repo: repo.clone(),
-            });
+            action = Some(Action::Created { repo: repo.clone() });
             *close = true;
         }
         if ui.button("Cancelar").clicked() {

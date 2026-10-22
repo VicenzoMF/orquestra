@@ -106,6 +106,17 @@ pub fn orchestrator_presets(config: &AppConfig) -> Vec<&AgentPreset> {
         .collect()
 }
 
+/// Preset do orquestrador: o escolhido na config ou, se ele sumiu, o primeiro
+/// que pode orquestrar.
+pub fn default_orchestrator(config: &AppConfig) -> Option<&AgentPreset> {
+    let presets = orchestrator_presets(config);
+    presets
+        .iter()
+        .find(|p| p.name == config.orchestration.orchestrator_preset)
+        .or(presets.first())
+        .copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
