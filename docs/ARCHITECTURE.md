@@ -276,6 +276,11 @@ nome, o id e o status.
   - Com novidade, responde `{"decision":"block","reason":"…"}` e o Claude
     continua já sabendo.
   - Sem novidade, escreve a OSC `waiting` no PTY do agente e deixa parar.
+  - Parado com filhos vivos (o `wait_for` em segundo plano o acorda), o
+    orquestrador espera os agentes, não o humano: a UI mostra "aguardando
+    agentes" (azul, fora de "Precisa de você") e o hub não manda a
+    notificação "Aguardando sua resposta". Se a tela dele perguntar sim/não,
+    volta a ser com você.
 
   Para Codex (sem hook equivalente) vale só o modo puxado.
 
@@ -382,6 +387,10 @@ os agentes, visíveis ou não, então sempre responde.
 
 ### app
 - **Canvas.** `egui::Scene` (pan/zoom).
+  - O `Scene` escala as formas da camada, e texto escalado é a rasterização
+    de 100% esticada (borrada). Depois de desenhar, cada texto da camada é
+    refeito no tamanho em que aparece e encolhido de volta (`sharpen_text`),
+    em degraus de 1/24 de oitava para não encher o atlas de fontes no zoom.
   - Uma moldura por sessão, com nome, repositório e resumo. O orquestrador fica
     à esquerda e os workers numa coluna, ligados por linhas ortogonais na cor
     do status, com a tarefa como rótulo. Avulsos ficam sem seta.
@@ -390,8 +399,8 @@ os agentes, visíveis ou não, então sempre responde.
     zoom e o foco.
   - A prévia vem de `term::preview`, sobre a tela do terminal. Ela ignora a
     caixa de entrada do Claude Code e tudo abaixo dela (statusline, modo de
-    permissão), além do spinner. Sim/Não só aparecem se o agente aguarda e
-    a tela pergunta:
+    permissão), além do spinner em qualquer quadro (`*` incluso, senão a
+    linha pisca). Sim/Não só aparecem se o agente aguarda e a tela pergunta:
     - menu com uma opção "Yes…" e uma "No…": responde pelo atalho da opção,
       como `(y)` ou `(esc)`, ou pelo número dela; sem nenhum dos dois, usa
       setas a partir da destacada + Enter (é o caso do aviso de confiança na
@@ -400,11 +409,17 @@ os agentes, visíveis ou não, então sempre responde.
   - Layout automático em árvore, sem persistência no MVP.
 - **Topo.** Pills de sessão (Todas / cada sessão, com resumo) e
   "+ Nova orquestração".
-- **Painel lateral.** Com um nó selecionado, mostra o terminal completo ou o
-  navegador. Sem seleção, mostra três blocos:
-  - **Precisa de você:** input, aprovação e falhas de todas as sessões;
-  - **Orquestrações:** um resumo de cada uma;
-  - **Recursos:** vagas usadas e limite, navegadores abertos, RAM do app.
+- **Painéis flutuantes** (`ui/overlay`), fixos na tela sobre o canvas; o
+  enquadramento automático deixa livres as faixas de cima e de baixo:
+  - **Orquestrações** (canto de cima à esquerda): um botão que abre a lista,
+    uma orquestração de cada vez (cascata), com focar, orquestrador e
+    encerrar. Esc ou clique no canvas fecha;
+  - **Precisa de você** (canto de cima à direita, recolhível; só aparece com
+    algo pendente): input, aprovação e falhas de todas as sessões;
+  - **Recursos** (canto de baixo à direita, uma linha): vagas, fila,
+    navegadores abertos e RAM do app.
+- **Painel lateral.** Só existe com um nó selecionado: terminal completo ou
+  navegador.
 - **Terminal.** Renderer próprio sobre `alacritty_terminal`; o `egui_term`
   serve só de referência (MIT) e não entra como dependência, porque cria o
   próprio PTY e está preso ao egui 0.31.
@@ -424,20 +439,22 @@ principal:
 
 ```
 ┌ orquestra  [Todas][loja · 1 aguardando][blog · 1 falhou]  [+ Nova orquestração]      [cfg] ┐
-├ Visão geral  [- 70% +] [Ajustar]                     ● rodando ● aguardando ✓ ✕ ◌ ┬────────┤
-│ ┌ loja · login + produtos ───────────────────────────────────────┐ │ Precisa de você │
-│ │ ┌ orquestrador ───────┐        ┌ ● login-ui  aguardando você ┐ │ │ ● login-ui loja │
-│ │ │ Claude Code ● rod.  │──┬────▶│   Permitir npm install?     │ │ │  [Sim] [Não]    │
-│ │ │ objetivo / plano    │  ├────▶│ ✓ api        pronto         │ │ │ ✕ estilos blog  │
-│ │ │ [fale com ele…]     │  ├────▶│ ● qa-navegador :41745       │ │ │ Orquestrações   │
-│ │ └─────────────────────┘  └-─-─▶│ ◌ docs       iniciando      │ │ │  loja · blog    │
-│ └────────────────────────────────────────────────────────────────┘ │ Recursos        │
-│ ┌ blog · migração para Astro ────────────────────────────────────┐ │  7 de 8 vagas   │
-│ │ orquestrador Codex ──┬──▶ migra-posts / ✕ estilos / links      │ │  RAM 52 MB      │
-│ └────────────────────────────────────────────────────────────────┘ │                 │
-├────────────────────────────────────────────────────────────────────┴─────────────────┤
-│ 2 orquestrações · 7 agentes · 1 aguardando · 1 falhou | 2 navegadores | RAM 52 MB | ok │
-└──────────────────────────────────────────────────────────────────────────────────────┘
+├ Visão geral  [- 70% +] [Ajustar]                         ● rodando ● aguardando ✓ ✕ ◌ ┤
+│ (≡ Orquestrações 2 ∨)                                    ┌ ● Precisa de você 2    ∧ ┐ │
+│      ┌ loja · login + produtos ───────────────────────────┐│ ● login-ui  loja         │ │
+│      │ ┌ orquestrador ──────┐     ┌ ● login-ui aguardando ┐││  Permitir npm install?  │ │
+│      │ │ Claude Code ● rod. │──┬─▶│   Permitir npm…       │││  [Sim] [Não] [Terminal] │ │
+│      │ │ objetivo / plano   │  ├─▶│ ✓ api        pronto   │││ ✕ estilos  blog         │ │
+│      │ │ [fale com ele…]    │  └─▶│ ● qa-navegador :41745 │││  [Terminal] [Remover…]  │ │
+│      │ └────────────────────┘     └───────────────────────┘│└──────────────────────────┘ │
+│      └────────────────────────────────────────────────────┘                             │
+│      ┌ blog · migração para Astro ────────────────────────┐                             │
+│      │ orquestrador Codex ──┬──▶ migra-posts / ✕ estilos  │                             │
+│      └────────────────────────────────────────────────────┘                             │
+│                                              (vagas ▮▮▮▮▯▯▯▯ 4/8 · 1 navegador · 52 MB) │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│ 2 orquestrações · 7 agentes · 1 aguardando você · 1 falhou | ● hub ok                  │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 8. Memória e abertura (medido)

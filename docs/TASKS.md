@@ -45,6 +45,13 @@ Worktrees em `../orquestra-worktrees/<crate>`, branches `phase1/<crate>`.
 - [x] Comando `orq` como o `code .`: abre o repositório da pasta (diálogo ou, com
       `-g`, a orquestração), desprende do terminal e reaproveita a janela aberta
       (instância única por socket); `orquestra` vira apelido
+- [x] Orquestrador parado com filhos vivos fica "aguardando agentes" (sem
+      notificação de "aguardando sua resposta")
+- [x] Texto do canvas nítido em qualquer zoom (refeito no tamanho da tela)
+- [x] Spinner `*` do Claude Code fora da prévia (a linha do card piscava)
+- [x] Painel da direita só para o agente selecionado; "Precisa de você",
+      "Orquestrações" (botão com lista em cascata) e "Recursos" (uma linha)
+      flutuam fixos sobre o canvas
 
 ## Próximos passos sugeridos
 - [ ] Evento `Resized` no core para o gateway acompanhar o tamanho do terminal
