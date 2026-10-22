@@ -12,10 +12,14 @@ pub mod env {
     pub const SOCKET: &str = "ORQUESTRA_SOCKET";
     /// Credencial do orquestrador no gateway (só orquestradores).
     pub const TOKEN: &str = "ORQUESTRA_TOKEN";
+    /// PTY do agente (`/dev/pts/N`), onde os hooks escrevem as sequências de
+    /// `osc`. O Claude Code roda hooks numa sessão nova, sem terminal de
+    /// controle: para eles `/dev/tty` não existe.
+    pub const TTY: &str = "ORQUESTRA_TTY";
 }
 
-/// Sequências OSC invisíveis que os hooks dos agentes escrevem no próprio TTY
-/// (`> /dev/tty`) para o runner saber o status sem adivinhar pela tela.
+/// Sequências OSC invisíveis que os hooks dos agentes escrevem no PTY do agente
+/// (`> "$ORQUESTRA_TTY"`) para o runner saber o status sem adivinhar pela tela.
 /// Formato: `ESC ] 777 ; orquestra ; <estado> BEL`.
 pub mod osc {
     /// Terminou o turno e espera o humano (hooks `Stop` e `Notification`).

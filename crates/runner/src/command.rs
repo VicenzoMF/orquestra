@@ -242,7 +242,8 @@ fn codex_server_name(name: &str) -> String {
     }
 }
 
-/// Comando de shell que escreve `seq` no TTY do agente, onde o runner a lê.
+/// Comando de shell que escreve `seq` no PTY do agente, onde o runner a lê:
+/// o caminho vem de `ORQUESTRA_TTY` (hooks do Claude Code não têm `/dev/tty`).
 /// Silencioso e com status 0 mesmo sem TTY, para o hook nunca virar erro.
 pub(crate) fn osc_command(seq: &str) -> String {
     let mut format = String::new();
@@ -257,7 +258,10 @@ pub(crate) fn osc_command(seq: &str) -> String {
             }
         }
     }
-    format!("{{ printf '{format}' > /dev/tty; }} 2>/dev/null || true")
+    format!(
+        "{{ printf '{format}' > \"${{{}:-/dev/tty}}\"; }} 2>/dev/null || true",
+        env::TTY
+    )
 }
 
 /// String básica TOML entre aspas, com escapes.
@@ -379,12 +383,12 @@ mod tests {
     fn osc_command_escapes_the_sequence_for_printf() {
         assert_eq!(
             osc_command(osc::WAITING),
-            "{ printf '\\033]777;orquestra;waiting\\007' > /dev/tty; } 2>/dev/null || true"
+            "{ printf '\\033]777;orquestra;waiting\\007' > \"${ORQUESTRA_TTY:-/dev/tty}\"; } 2>/dev/null || true"
         );
         assert!(osc_command(osc::RUNNING).contains("orquestra;running\\007"));
         assert_eq!(
             osc_command("a%b\\c'd"),
-            "{ printf 'a%%b\\\\c'\\''d' > /dev/tty; } 2>/dev/null || true"
+            "{ printf 'a%%b\\\\c'\\''d' > \"${ORQUESTRA_TTY:-/dev/tty}\"; } 2>/dev/null || true"
         );
     }
 

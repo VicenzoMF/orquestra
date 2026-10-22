@@ -136,9 +136,11 @@ pub fn run_stop_hook() -> i32 {
     0
 }
 
-/// Avisa o runner (pelo TTY) que o orquestrador parou e espera o humano.
+/// Avisa o runner (pelo PTY do agente) que o orquestrador parou e espera o
+/// humano. Hooks do Claude Code não têm `/dev/tty`: vale `ORQUESTRA_TTY`.
 fn write_waiting_osc() {
-    if let Ok(mut tty) = OpenOptions::new().write(true).open("/dev/tty") {
+    let path = std::env::var_os(conventions::env::TTY).unwrap_or_else(|| "/dev/tty".into());
+    if let Ok(mut tty) = OpenOptions::new().write(true).open(path) {
         let _ = tty.write_all(conventions::osc::WAITING.as_bytes());
         let _ = tty.flush();
     }

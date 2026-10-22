@@ -16,10 +16,8 @@ use orquestra_runner::Runner;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// O mesmo comando que os hooks injetados rodam (ver `command.rs`).
-const WAITING_HOOK: &str =
-    r"{ printf '\033]777;orquestra;waiting\007' > /dev/tty; } 2>/dev/null || true";
-const RUNNING_HOOK: &str =
-    r"{ printf '\033]777;orquestra;running\007' > /dev/tty; } 2>/dev/null || true";
+const WAITING_HOOK: &str = r#"{ printf '\033]777;orquestra;waiting\007' > "${ORQUESTRA_TTY:-/dev/tty}"; } 2>/dev/null || true"#;
+const RUNNING_HOOK: &str = r#"{ printf '\033]777;orquestra;running\007' > "${ORQUESTRA_TTY:-/dev/tty}"; } 2>/dev/null || true"#;
 
 fn config() -> RunnerConfig {
     RunnerConfig {
@@ -323,8 +321,17 @@ async fn replay_returns_the_tail_of_the_output() {
 async fn osc_from_hooks_drives_the_status() {
     let bus = EventBus::new();
     let runner = Runner::new(bus.clone(), config());
-    let script = format!("{WAITING_HOOK}; sleep 0.4; {RUNNING_HOOK}; sleep 0.4");
-    let mut watch = start(&runner, &bus, sh(&script)).await;
+    // Como o Claude Code: cada hook numa sessão nova, sem terminal de controle.
+    let script = r#"S=$(command -v setsid >/dev/null && echo "setsid -w")
+        $S sh -c "$H_WAITING"; sleep 0.4; $S sh -c "$H_RUNNING"; sleep 0.4"#;
+    let mut req = sh(script);
+    req.config
+        .env
+        .insert("H_WAITING".to_owned(), WAITING_HOOK.to_owned());
+    req.config
+        .env
+        .insert("H_RUNNING".to_owned(), RUNNING_HOOK.to_owned());
+    let mut watch = start(&runner, &bus, req).await;
 
     watch.terminal().await;
     assert_eq!(
@@ -336,7 +343,7 @@ async fn osc_from_hooks_drives_the_status() {
             AgentStatus::Done { exit_code: Some(0) },
         ]
     );
-    // Passou por /dev/tty e chega crua no `Output` (o terminal da UI a ignora).
+    // Passou pelo PTY e chega crua no `Output` (o terminal da UI a ignora).
     assert!(watch.text().contains("\x1b]777;orquestra;waiting\x07"));
 }
 
@@ -443,7 +450,8 @@ async fn environment_is_layered_and_cleaned() {
     let runner = Runner::new(bus.clone(), config());
     let mut req = sh(
         "echo \"id=$ORQUESTRA_AGENT_ID sess=$ORQUESTRA_SESSION_ID term=$TERM \
-         color=$COLORTERM cdp=$ORQUESTRA_CDP_URL x=$X_TESTE cc=${CLAUDECODE:-nenhum}\"",
+         color=$COLORTERM cdp=$ORQUESTRA_CDP_URL x=$X_TESTE cc=${CLAUDECODE:-nenhum} \
+         tty=$ORQUESTRA_TTY real=$(tty)\"",
     );
     req.config
         .env
@@ -466,6 +474,17 @@ async fn environment_is_layered_and_cleaned() {
     assert!(text.contains("cdp=http://127.0.0.1:9555"), "{text}");
     assert!(text.contains("x=hub"), "{text}");
     assert!(text.contains("cc=nenhum"), "{text}");
+    // O PTY anunciado é o mesmo do processo.
+    let tty = text
+        .split("tty=")
+        .nth(1)
+        .and_then(|t| t.split_whitespace().next());
+    let real = text
+        .split("real=")
+        .nth(1)
+        .and_then(|t| t.split_whitespace().next());
+    assert!(tty.is_some_and(|t| t.starts_with("/dev/")), "{text}");
+    assert_eq!(tty, real, "{text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

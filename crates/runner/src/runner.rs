@@ -18,6 +18,7 @@ use bytes::Bytes;
 use orquestra_core::{
     AgentEvent, AgentId, AgentInfo, AgentKind, AgentRunner, AgentStatus, Error, EventBus, Result,
     RunnerConfig, SpawnRequest, TermSize, Timestamp, Workspace, WorktreeCleanup, WorktreeInfo,
+    conventions,
 };
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::watch;
@@ -263,13 +264,20 @@ impl Inner {
         worktree: Option<WorktreeInfo>,
     ) -> Result<AgentInfo> {
         let id = req.id;
-        let spec = build_command(req, workdir);
+        let mut spec = build_command(req, workdir);
         if spec.program.trim().is_empty() {
             return Err(Error::Spawn("programa vazio".to_owned()));
         }
         let pair = native_pty_system()
             .openpty(pty_size(req.config.size))
             .map_err(|err| Error::Spawn(format!("openpty: {err}")))?;
+        // Onde os hooks escrevem o status (ver `conventions::env::TTY`).
+        if let Some(tty) = pair.master.tty_name() {
+            spec.env.insert(
+                conventions::env::TTY.to_owned(),
+                tty.to_string_lossy().into_owned(),
+            );
+        }
         let mut child = pair
             .slave
             .spawn_command(command_builder(&spec))
