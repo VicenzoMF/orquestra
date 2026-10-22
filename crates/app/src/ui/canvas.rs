@@ -498,17 +498,24 @@ fn draw(
         let c = layout.bounds.center();
         let painter = ui.painter();
         painter.text(
-            c - vec2(0.0, 14.0),
+            c - vec2(0.0, 22.0),
             Align2::CENTER_CENTER,
             "Nenhuma orquestração ainda",
             FontId::proportional(20.0),
             theme::TEXT,
         );
         painter.text(
-            c + vec2(0.0, 16.0),
+            c + vec2(0.0, 8.0),
             Align2::CENTER_CENTER,
-            "Crie uma em “+ Nova orquestração” (Ctrl+Shift+N)",
+            "Clique com o botão direito para iniciar um orquestrador",
             FontId::proportional(14.0),
+            theme::TEXT_DIM,
+        );
+        painter.text(
+            c + vec2(0.0, 30.0),
+            Align2::CENTER_CENTER,
+            "ou use Ctrl+Shift+N",
+            FontId::proportional(12.5),
             theme::TEXT_DIM,
         );
         return;

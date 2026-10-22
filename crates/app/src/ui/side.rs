@@ -335,7 +335,12 @@ fn overview(
         let sessions = cx.model.sessions();
         widgets::section_title(ui, "Orquestrações", Some(sessions.len()));
         if sessions.is_empty() {
-            ui.label(RichText::new("Nenhuma. Use “+ Nova orquestração”.").color(theme::TEXT_DIM));
+            ui.label(
+                RichText::new(
+                    "Nenhuma. Clique com o botão direito no canvas para iniciar um orquestrador.",
+                )
+                .color(theme::TEXT_DIM),
+            );
         }
         for session in sessions {
             let c = cx.model.counts(Some(session.id));
@@ -437,7 +442,8 @@ fn overview(
         ui.add_space(8.0);
         ui.label(
             RichText::new(
-                "Ctrl+Shift+N nova orquestração · Ctrl+Shift+↑/↓ agente · Ctrl+Shift+B navegador",
+                "Botão direito no canvas ou Ctrl+Shift+N novo orquestrador · \
+                 Ctrl+Shift+↑/↓ agente · Ctrl+Shift+B navegador",
             )
             .size(11.5)
             .color(theme::TEXT_DIM),
