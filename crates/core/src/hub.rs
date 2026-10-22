@@ -21,12 +21,18 @@ use tokio::task::JoinSet;
 use tracing::warn;
 
 use crate::{
-    AgentConfig, AgentEvent, AgentId, AgentRole, AgentRunner, AgentStatus, AppConfig,
-    BrowserManager, Command, CommandReceiver, Error, EventBus, EventReceiver, McpServerTemplate,
-    Navigation, NotificationConfig, Notifier, OrchestrationConfig, OrchestratorGateway,
-    QueueReason, Result, SessionConfig, SessionId, SpawnRequest, Store, WorktreeCleanup,
-    notification_for,
+    AgentConfig, AgentEvent, AgentId, AgentInfo, AgentRecord, AgentRole, AgentRunner, AgentStatus,
+    AppConfig, BrowserManager, Command, CommandReceiver, Error, EventBus, EventReceiver,
+    McpServerTemplate, Navigation, NotificationConfig, Notifier, OrchestrationConfig,
+    OrchestratorGateway, QueueReason, Result, SessionConfig, SessionId, SpawnRequest, Store,
+    Workspace, WorktreeCleanup, notification_for,
 };
+
+/// Janela em que a primeira espera de um agente reaberto não notifica.
+const RESUME_QUIET: Duration = Duration::from_secs(30);
+
+/// Quanto da saída gravada volta ao terminal de um agente reaberto sem processo.
+const RESTORED_REPLAY_BYTES: usize = 512 * 1024;
 
 /// Tempo que as lanes têm para esvaziar a fila no shutdown antes de serem abortadas.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
@@ -133,8 +139,10 @@ where
         }
 
         router.drain().await;
-        inner.services.runner.shutdown().await;
-        inner.services.browser.shutdown().await;
+        // O store para de gravar antes de os agentes morrerem: o banco fica
+        // com cada um como estava, e a próxima abertura os reabre (como
+        // depois de uma queda). Sem o recorder, o fim deles também não vira
+        // notificação.
         inner.bus.publish(AgentEvent::Shutdown);
         let joined = tokio::time::timeout(
             SHUTDOWN_GRACE,
@@ -144,11 +152,13 @@ where
         if joined.is_err() {
             warn!("recorder não terminou a tempo");
         }
+        inner.services.runner.shutdown().await;
+        inner.services.browser.shutdown().await;
     }
 }
 
 enum LaneCmd {
-    Spawn(AgentConfig),
+    Spawn(Box<AgentConfig>),
     Run(Command),
 }
 
@@ -210,6 +220,7 @@ where
             Command::CreateSession { id, config } => self.create_session(id, *config),
             Command::CloseSession { id, cleanup } => self.close_session(id, cleanup),
             Command::Spawn { id, config } => self.spawn(id, *config),
+            Command::Restore { record } => self.restore(*record),
             Command::ApproveSpawn { id } => self.approve(id),
             Command::RejectSpawn { id } => self.reject(id),
             Command::Remove { id, cleanup } => self.remove(id, cleanup),
@@ -298,8 +309,11 @@ where
                 format!("spawn: sessão desconhecida: {}", config.session),
             );
         };
-        let needs_approval =
-            config.role == AgentRole::Worker && config.parent.is_some() && session.approve_spawns;
+        // Reabrir não é criar: já foi aprovado na execução anterior.
+        let needs_approval = config.role == AgentRole::Worker
+            && config.parent.is_some()
+            && session.approve_spawns
+            && !config.workspace.resumes();
         let reason = if needs_approval {
             QueueReason::Approval
         } else {
@@ -326,6 +340,66 @@ where
                 status: AgentStatus::Queued { reason },
             });
         }
+    }
+
+    fn restore(&mut self, record: AgentRecord) {
+        let AgentRecord {
+            id,
+            mut config,
+            info,
+            status,
+            ..
+        } = record;
+        if status.is_terminal() {
+            return self.restore_finished(id, config, info, status);
+        }
+        // Já tinha processo: volta onde estava, com a conversa. Sem `info`
+        // (na fila, ou caiu antes de subir), começa como da primeira vez.
+        if let Some(info) = info {
+            config.workspace = Workspace::Restore {
+                path: info.workdir,
+                worktree: info.worktree,
+            };
+        }
+        self.spawn(id, config);
+    }
+
+    fn restore_finished(
+        &mut self,
+        id: AgentId,
+        config: AgentConfig,
+        info: Option<AgentInfo>,
+        status: AgentStatus,
+    ) {
+        if self.agents.contains_key(&id) {
+            return self.error(Some(id), format!("restore: {}", Error::AgentExists(id)));
+        }
+        if !self.sessions.contains_key(&config.session) {
+            return self.error(
+                Some(id),
+                format!("restore: sessão desconhecida: {}", config.session),
+            );
+        }
+        let config = Arc::new(config);
+        self.publish(AgentEvent::Created {
+            id,
+            config: config.clone(),
+        });
+        if let Some(info) = info {
+            self.publish(AgentEvent::Spawned {
+                info: Arc::new(info),
+            });
+        }
+        self.agents.insert(
+            id,
+            Entry {
+                config,
+                status: status.clone(),
+                queued: None,
+            },
+        );
+        self.publish(AgentEvent::StatusChanged { id, status });
+        self.tasks.spawn(self.inner.clone().replay_stored(id));
     }
 
     fn approve(&mut self, id: AgentId) {
@@ -397,7 +471,7 @@ where
         };
         entry.queued = None;
         entry.status = AgentStatus::Starting;
-        let config = (*entry.config).clone();
+        let config = Box::new((*entry.config).clone());
         self.publish(AgentEvent::StatusChanged {
             id,
             status: AgentStatus::Starting,
@@ -498,7 +572,7 @@ where
     async fn run_lane(self: Arc<Self>, id: AgentId, mut rx: mpsc::UnboundedReceiver<LaneCmd>) {
         while let Some(cmd) = rx.recv().await {
             let (name, result) = match cmd {
-                LaneCmd::Spawn(config) => ("spawn", self.spawn_agent(id, config).await),
+                LaneCmd::Spawn(config) => ("spawn", self.spawn_agent(id, *config).await),
                 LaneCmd::Run(cmd) => (cmd.name(), self.handle(id, cmd).await),
             };
             if let Err(err) = result {
@@ -544,6 +618,7 @@ where
             Command::CreateSession { .. }
             | Command::CloseSession { .. }
             | Command::Spawn { .. }
+            | Command::Restore { .. }
             | Command::ApproveSpawn { .. }
             | Command::RejectSpawn { .. }
             | Command::LoadHistory { .. }
@@ -634,6 +709,25 @@ where
         }
     }
 
+    /// O terminal de um agente reaberto sem processo: o fim da saída gravada.
+    async fn replay_stored(self: Arc<Self>, id: AgentId) {
+        let inner = self.clone();
+        let read = tokio::task::spawn_blocking(move || {
+            inner.services.store.output_log(id, RESTORED_REPLAY_BYTES)
+        })
+        .await;
+        match read {
+            Ok(Ok(data)) if !data.is_empty() => self.bus.publish(AgentEvent::Replay {
+                id,
+                next_seq: 0,
+                data: data.into(),
+            }),
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => self.publish_error(Some(id), format!("restore: {err}")),
+            Err(err) => self.publish_error(Some(id), format!("restore: {err}")),
+        }
+    }
+
     async fn save_config(self: Arc<Self>, config: Box<AppConfig>) {
         *self
             .notifications
@@ -660,6 +754,9 @@ where
         // Pai de cada agente criado por outro, e quem é orquestrador.
         let mut parents: HashMap<AgentId, AgentId> = HashMap::new();
         let mut orchestrators: HashSet<AgentId> = HashSet::new();
+        // Reabertos, desde quando: voltam todos parados, e a primeira espera
+        // logo depois de reabrir não é novidade para notificar.
+        let mut resumed: HashMap<AgentId, std::time::Instant> = HashMap::new();
         loop {
             let event = match rx.blocking_recv() {
                 Ok(event) => event,
@@ -681,6 +778,9 @@ where
                     if config.role == AgentRole::Orchestrator {
                         orchestrators.insert(*id);
                     }
+                    if config.workspace.resumes() {
+                        resumed.insert(*id, std::time::Instant::now());
+                    }
                 }
                 AgentEvent::StatusChanged { id, status } => {
                     let prev = last.insert(*id, status.clone());
@@ -691,7 +791,13 @@ where
                         && parents.iter().any(|(child, parent)| {
                             parent == id && last.get(child).is_none_or(AgentStatus::is_alive)
                         });
-                    if watching {
+                    // Um agente que aparece já terminado foi reaberto assim.
+                    let restored_finished = prev.is_none() && status.is_terminal();
+                    let restored_idle = *status == AgentStatus::WaitingForInput
+                        && resumed
+                            .remove(id)
+                            .is_some_and(|at| at.elapsed() < RESUME_QUIET);
+                    if watching || restored_finished || restored_idle {
                         continue;
                     }
                     let name = names.get(id).map_or("agente", String::as_str);
@@ -711,6 +817,7 @@ where
                     last.remove(id);
                     parents.remove(id);
                     orchestrators.remove(id);
+                    resumed.remove(id);
                 }
                 AgentEvent::Shutdown => break,
                 _ => {}
@@ -745,7 +852,7 @@ mod tests {
     use crate::{
         AgentInfo, AgentKind, BrowserEndpoint, BrowserInput, CommandSender, History, McpServerSpec,
         Notification, NotificationKind, OrchestratorGrant, TermSize, Timestamp, Viewport,
-        Workspace, command_channel,
+        WorktreeInfo, command_channel,
     };
 
     #[derive(Default)]
@@ -865,7 +972,7 @@ mod tests {
             Ok(History::default())
         }
         fn output_log(&self, _id: AgentId, _max_bytes: usize) -> Result<Vec<u8>> {
-            Ok(Vec::new())
+            Ok(b"saida gravada".to_vec())
         }
         fn load_config(&self) -> Result<AppConfig> {
             Ok(AppConfig::default())
@@ -1499,6 +1606,125 @@ mod tests {
         assert_eq!(notifications.lock().unwrap()[0].title, "claude-1");
     }
 
+    /// Reabrir depois de um reinício: o vivo sobe onde estava e retoma a
+    /// conversa, sem pedir aprovação de novo; o terminado volta sem processo,
+    /// com a saída gravada; e nada disso vira notificação.
+    #[tokio::test]
+    async fn restore_reopens_live_agents_and_brings_back_finished_ones() {
+        let mut h = Harness::start(Opts::default());
+        let s = h
+            .session(SessionConfig {
+                approve_spawns: true,
+                ..loja()
+            })
+            .await;
+        let (orq, live, done) = (
+            AgentId::generate(),
+            AgentId::generate(),
+            AgentId::generate(),
+        );
+        let worktree = WorktreeInfo {
+            repo: "/src/loja".into(),
+            path: "/wt/api".into(),
+            branch: "orquestra/api".to_owned(),
+            base_ref: "HEAD".to_owned(),
+            base_commit: "abc".to_owned(),
+        };
+        let record = |id, config: AgentConfig, worktree: Option<WorktreeInfo>, status| {
+            let info = AgentInfo {
+                id,
+                config: config.clone(),
+                workdir: worktree
+                    .as_ref()
+                    .map_or("/src/loja".into(), |w| w.path.clone()),
+                worktree,
+                pid: Some(9),
+                browser: None,
+                started_at: Timestamp::now(),
+            };
+            Command::Restore {
+                record: Box::new(AgentRecord {
+                    id,
+                    config,
+                    info: Some(info),
+                    status,
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
+                }),
+            }
+        };
+        let orq_cfg = AgentConfig {
+            role: AgentRole::Orchestrator,
+            ..agent(s, "orquestrador")
+        };
+        let child = |name| AgentConfig {
+            parent: Some(orq),
+            ..agent(s, name)
+        };
+        h.send(record(orq, orq_cfg, None, AgentStatus::WaitingForInput));
+        h.send(record(
+            live,
+            child("api"),
+            Some(worktree.clone()),
+            AgentStatus::Running,
+        ));
+        h.send(record(
+            done,
+            child("docs"),
+            None,
+            AgentStatus::Done { exit_code: Some(0) },
+        ));
+
+        // Sem aprovação: sai direto para `Starting`.
+        assert_eq!(h.status_of(live).await, AgentStatus::Starting);
+        // O replay do terminado e o spawn do vivo correm em paralelo.
+        let (mut replay, mut spawned) = (None, false);
+        while replay.is_none() || !spawned {
+            match h.next_event().await {
+                AgentEvent::Replay { id, next_seq, data } if id == done => {
+                    replay = Some((next_seq, data));
+                }
+                AgentEvent::Spawned { info } if info.id == live => spawned = true,
+                _ => {}
+            }
+        }
+        assert_eq!(replay, Some((0, Bytes::from_static(b"saida gravada"))));
+        let workspace = |name: &str| {
+            h.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|r| r.config.name == name)
+                .map(|r| r.config.workspace.clone())
+        };
+        assert_eq!(
+            workspace("api"),
+            Some(Workspace::Restore {
+                path: "/wt/api".into(),
+                worktree: Some(worktree),
+            })
+        );
+        assert_eq!(
+            workspace("orquestrador"),
+            Some(Workspace::Restore {
+                path: "/src/loja".into(),
+                worktree: None,
+            })
+        );
+        assert_eq!(workspace("docs"), None, "terminado não sobe processo");
+
+        // Todos voltam parados: não é novidade.
+        for id in [orq, live] {
+            h.bus.publish(AgentEvent::StatusChanged {
+                id,
+                status: AgentStatus::WaitingForInput,
+            });
+        }
+        let notifications = h.notifications.clone();
+        h.shutdown().await;
+        assert!(notifications.lock().unwrap().is_empty());
+    }
+
     /// O orquestrador para à espera dos filhos (`wait_for` em segundo plano):
     /// isso não é "aguardando sua resposta". Sem filho vivo, é.
     #[tokio::test]
@@ -1558,7 +1784,9 @@ mod tests {
         let mut events = h.bus.subscribe();
         let log = h.shutdown().await;
         let tail = &log[log.len() - 3..];
-        assert_eq!(tail, ["runner.shutdown", "browser.shutdown", "store.flush"]);
+        // O store grava tudo antes de os agentes morrerem (o banco os guarda
+        // vivos, para reabrir).
+        assert_eq!(tail, ["store.flush", "runner.shutdown", "browser.shutdown"]);
         assert!(log.contains(&"save_config".to_owned()));
         assert!(matches!(events.recv().await.unwrap(), AgentEvent::Shutdown));
     }

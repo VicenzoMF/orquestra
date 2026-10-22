@@ -15,6 +15,18 @@ use serde_json::{Map, Value, json};
 const INHERITED_ENV_REMOVE: &[&str] = &[
     // O Claude Code se recusa a abrir dentro de outra sessão dele.
     "CLAUDECODE",
+    // Identidade da sessão do Claude Code que abriu o `orq` (se veio de
+    // uma): o agente se acharia filho dela e não gravaria a conversa, e sem
+    // ela não há `--resume`. A config do usuário (chaves, CLAUDE_CONFIG_DIR)
+    // continua sendo herdada.
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_PID",
     "TERM_PROGRAM",
     "TERM_PROGRAM_VERSION",
     "TERM_SESSION_ID",

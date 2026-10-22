@@ -15,7 +15,7 @@ use orquestra_app::instance::{self, Instance, OpenRequest};
 use orquestra_app::mock::NullStore;
 use orquestra_app::ui::OrquestraApp;
 use orquestra_browser::Chromium;
-use orquestra_core::{AppConfig, Command, Services, Store};
+use orquestra_core::{AppConfig, Command, History, Services, Store};
 use orquestra_mcp::McpGateway;
 use orquestra_runner::Runner;
 use orquestra_store::{DesktopNotifier, SqliteStore};
@@ -184,10 +184,10 @@ fn run(
         .enable_all()
         .build()?;
 
-    let (config, backend) = if mock {
+    let (config, backend, reopen) = if mock {
         let config = NullStore.load_config()?;
         let backend = backend::start_mock(runtime.handle(), &config, 1.0, request.repo.is_none())?;
-        (config, backend)
+        (config, backend, History::default())
     } else {
         start_real(&runtime)?
     };
@@ -214,6 +214,8 @@ fn run(
         shared.clone(),
         repaint.clone(),
     );
+    // Depois dos feeds: a UI vê cada sessão e agente reaberto chegar.
+    reopen_sessions(&cmd, reopen);
 
     // O pedido desta execução e os que vierem de outros `orq`.
     shared.push_open(request, false);
@@ -259,16 +261,14 @@ fn run(
     result.map_err(|err| anyhow!("{err}"))
 }
 
-/// Serviços reais: SQLite + config, PTYs, Chromium, notificações e o gateway MCP.
-fn start_real(runtime: &tokio::runtime::Runtime) -> anyhow::Result<(AppConfig, Backend)> {
+/// Serviços reais: SQLite + config, PTYs, Chromium, notificações e o gateway
+/// MCP. Devolve também o que estava aberto quando o app parou.
+fn start_real(runtime: &tokio::runtime::Runtime) -> anyhow::Result<(AppConfig, Backend, History)> {
     let store = SqliteStore::open_default().context("abrir o banco")?;
-    let interrupted = store.close_interrupted()?;
-    if interrupted > 0 {
-        info!(
-            interrupted,
-            "sessões da execução anterior fechadas como interrompidas"
-        );
-    }
+    let reopen = store.open_sessions().unwrap_or_else(|err| {
+        warn!(%err, "não deu para ler as sessões abertas; começando vazio");
+        History::default()
+    });
     let config = store.load_config()?;
     let backend = backend::start(runtime.handle(), &config, |bus, cmd| {
         Ok(Services {
@@ -279,7 +279,33 @@ fn start_real(runtime: &tokio::runtime::Runtime) -> anyhow::Result<(AppConfig, B
             gateway: McpGateway::start(cmd.clone(), bus.clone(), config.clone())?,
         })
     })?;
-    Ok((config, backend))
+    Ok((config, backend, reopen))
+}
+
+/// Reabre as sessões da execução anterior com os mesmos ids: cada agente
+/// vivo volta onde estava e retoma a conversa, quem estava na fila volta à
+/// fila e os terminados voltam como registro (`Command::Restore`). Pais antes
+/// dos filhos: o store devolve em ordem de criação.
+fn reopen_sessions(cmd: &orquestra_core::CommandSender, reopen: History) {
+    if reopen.sessions.is_empty() {
+        return;
+    }
+    info!(
+        sessions = reopen.sessions.len(),
+        agents = reopen.agents.len(),
+        "reabrindo as sessões da execução anterior"
+    );
+    for session in reopen.sessions {
+        let _ = cmd.send(Command::CreateSession {
+            id: session.id,
+            config: Box::new(session.config),
+        });
+    }
+    for record in reopen.agents {
+        let _ = cmd.send(Command::Restore {
+            record: Box::new(record),
+        });
+    }
 }
 
 /// Registra quanto o app levou do `main` até o primeiro quadro.

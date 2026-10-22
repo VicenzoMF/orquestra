@@ -214,14 +214,16 @@ async fn hub_records_into_sqlite_and_flushes_on_shutdown() {
         .expect("hub não parou")
         .unwrap();
 
-    // Outra store sobre o mesmo arquivo vê tudo gravado.
+    // Outra store sobre o mesmo arquivo vê tudo gravado. O Shutdown não
+    // fecha nada: a sessão e o agente, como estavam, são o que reabrir.
     let store = SqliteStore::open(&db, &config_path).unwrap();
     let history = store.history(5).unwrap();
-    assert!(history.sessions[0].closed_at.is_some());
+    assert_eq!(history.sessions[0].closed_at, None);
     let record = &history.agents[0];
     assert_eq!(record.config, agent_config);
     assert_eq!(record.info.as_ref().unwrap().pid, Some(7));
-    assert_eq!(record.status, AgentStatus::Done { exit_code: None });
+    assert_eq!(record.status, AgentStatus::WaitingForInput);
+    assert_eq!(store.open_sessions().unwrap(), history);
     assert_eq!(store.output_log(agent, 1024).unwrap(), b"ola mundo");
     assert_eq!(store.load_config().unwrap(), saved);
 

@@ -1,8 +1,8 @@
 use bytes::Bytes;
 
 use crate::{
-    AgentConfig, AgentId, AppConfig, BrowserInput, Navigation, SessionConfig, SessionId, TermSize,
-    Viewport, WorktreeCleanup,
+    AgentConfig, AgentId, AgentRecord, AppConfig, BrowserInput, Navigation, SessionConfig,
+    SessionId, TermSize, Viewport, WorktreeCleanup,
 };
 
 /// Pedidos ao sistema, vindos da UI ou do MCP `orquestra`. Não têm resposta
@@ -31,6 +31,14 @@ pub enum Command {
     Spawn {
         id: AgentId,
         config: Box<AgentConfig>,
+    },
+    /// Reabre um agente de uma execução anterior do app (a sessão dele já foi
+    /// recriada com o mesmo id). Vivo: sobe de novo onde estava e retoma a
+    /// conversa (`Workspace::Restore`), sem pedir aprovação de novo. Na fila:
+    /// volta à fila. Terminado: volta só o registro, sem processo, com a
+    /// saída guardada no store num `Replay`.
+    Restore {
+        record: Box<AgentRecord>,
     },
     /// Bytes já codificados para o terminal (teclas, colar com bracketed paste...).
     SendInput {
@@ -120,6 +128,7 @@ impl Command {
             | Self::BrowserInput { id, .. }
             | Self::BrowserNavigate { id, .. }
             | Self::BrowserResize { id, .. } => Some(*id),
+            Self::Restore { record } => Some(record.id),
             Self::CreateSession { .. }
             | Self::CloseSession { .. }
             | Self::LoadHistory { .. }
@@ -134,6 +143,7 @@ impl Command {
             Self::CreateSession { .. } => "create_session",
             Self::CloseSession { .. } => "close_session",
             Self::Spawn { .. } => "spawn",
+            Self::Restore { .. } => "restore",
             Self::SendInput { .. } => "send_input",
             Self::Resize { .. } => "resize",
             Self::Kill { .. } => "kill",

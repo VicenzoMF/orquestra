@@ -145,14 +145,22 @@ impl SqliteStore {
         &self.config_path
     }
 
-    /// Fecha sessões que ficaram abertas de uma execução anterior que não
-    /// chegou ao `Shutdown` (crash, kill -9). Os agentes vivos delas viram
-    /// `Failed`. Ignora as sessões deste processo. Chame na abertura do app,
-    /// antes do hub; devolve quantas sessões fechou.
+    /// Fecha sessões que ficaram abertas de uma execução anterior. Os
+    /// agentes vivos delas viram `Failed`. Ignora as sessões deste processo;
+    /// devolve quantas fechou. (O app reabre essas sessões em vez de
+    /// fechá-las: ver `open_sessions`.)
     ///
     /// Não é automático no `open`: outro processo pode estar usando o banco.
     pub fn close_interrupted(&self) -> Result<usize> {
         Ok(self.shared.db().close_interrupted()?)
+    }
+
+    /// O que estava aberto quando o app parou (fechado, desligado ou caído:
+    /// o `Shutdown` não fecha nada): sessões sem `closed_at` e os agentes não
+    /// removidos delas, com o último status de cada um. Chame na abertura,
+    /// antes do hub, para reabrir tudo.
+    pub fn open_sessions(&self) -> Result<History> {
+        Ok(self.shared.db().open_sessions()?)
     }
 }
 
@@ -174,7 +182,7 @@ impl Store for SqliteStore {
                 shared.db().status_changed(*id, status, now)
             }
             AgentEvent::Removed { id } => shared.db().agent_removed(*id, now),
-            AgentEvent::Shutdown => shared.shutdown(now),
+            AgentEvent::Shutdown => shared.shutdown(),
             AgentEvent::Replay { .. }
             | AgentEvent::BrowserStatus { .. }
             | AgentEvent::BrowserFrame { .. }
@@ -269,11 +277,11 @@ impl Shared {
         db.write_output(chunks, self.options.retention_bytes as u64)
     }
 
-    fn shutdown(&self, now: Timestamp) -> DbResult<()> {
+    /// Só grava o que falta. Sessões e agentes ficam como estão: a próxima
+    /// abertura os reabre (`open_sessions`).
+    fn shutdown(&self) -> DbResult<()> {
         let mut db = self.db();
-        let flushed = self.flush_locked(&mut db);
-        db.shutdown(now)?;
-        flushed
+        self.flush_locked(&mut db)
     }
 
     fn output_log(&self, id: AgentId, max_bytes: usize) -> DbResult<Vec<u8>> {
@@ -444,23 +452,6 @@ impl Db {
         Ok(())
     }
 
-    fn shutdown(&mut self, now: Timestamp) -> DbResult<()> {
-        let done = json(&AgentStatus::Done { exit_code: None })?;
-        let tx = self.conn.transaction()?;
-        for session in &self.own_sessions {
-            let key = session.to_string();
-            tx.prepare_cached(
-                "UPDATE sessions SET closed_at = ?2 WHERE id = ?1 AND closed_at IS NULL",
-            )?
-            .execute(params![key, now.0])?;
-            for agent in session_agents(&tx, &key)? {
-                finish_if_alive(&tx, &agent, &done, Some(now))?;
-            }
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
     fn close_interrupted(&mut self) -> DbResult<usize> {
         let failed = json(&AgentStatus::Failed {
             reason: "interrompido: o orquestra fechou sem encerrar o agente".to_owned(),
@@ -537,12 +528,36 @@ impl Db {
 
     fn history(&self, limit: usize) -> DbResult<History> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let mut sessions = Vec::new();
-        let mut stmt = self.conn.prepare_cached(
+        self.load(
             "SELECT id, config_json, created_at, closed_at FROM sessions
              ORDER BY created_at DESC, rowid DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map([limit], |row| {
+            [limit],
+            "SELECT id, config_json, info_json, status_json, created_at, updated_at FROM agents
+             WHERE session_id = ?1 ORDER BY created_at, rowid",
+        )
+    }
+
+    fn open_sessions(&self) -> DbResult<History> {
+        self.load(
+            "SELECT id, config_json, created_at, closed_at FROM sessions
+             WHERE closed_at IS NULL ORDER BY created_at, rowid",
+            [],
+            "SELECT id, config_json, info_json, status_json, created_at, updated_at FROM agents
+             WHERE session_id = ?1 AND removed_at IS NULL ORDER BY created_at, rowid",
+        )
+    }
+
+    /// Sessões de `sessions_sql` e, para cada uma, os agentes de `agents_sql`
+    /// (`?1` = id da sessão). Linhas ilegíveis são puladas com um aviso.
+    fn load(
+        &self,
+        sessions_sql: &str,
+        sessions_params: impl rusqlite::Params,
+        agents_sql: &str,
+    ) -> DbResult<History> {
+        let mut sessions = Vec::new();
+        let mut stmt = self.conn.prepare_cached(sessions_sql)?;
+        let rows = stmt.query_map(sessions_params, |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })?;
         for row in rows {
@@ -554,10 +569,7 @@ impl Db {
         }
 
         let mut agents = Vec::new();
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, config_json, info_json, status_json, created_at, updated_at FROM agents
-             WHERE session_id = ?1 ORDER BY created_at, rowid",
-        )?;
+        let mut stmt = self.conn.prepare_cached(agents_sql)?;
         for session in &sessions {
             let rows = stmt.query_map([session.id.to_string()], |row| {
                 Ok(AgentRow {

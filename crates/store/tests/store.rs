@@ -236,16 +236,15 @@ fn full_flow_round_trips_through_history() {
     let s = &history.sessions[0];
     assert_eq!(s.id, session);
     assert_eq!(s.config, session_config("loja · login"));
-    let closed = s.closed_at.expect("Shutdown fecha a sessão");
-    assert!(closed >= s.created_at);
+    assert_eq!(s.closed_at, None, "o Shutdown deixa a sessão para reabrir");
 
     assert_eq!(history.agents.len(), 2);
     let (o, w) = (&history.agents[0], &history.agents[1]);
     assert_eq!(o.id, orch);
     assert_eq!(o.config, orch_cfg);
     assert_eq!(o.info.as_ref(), Some(&orch_info));
-    // Ainda rodando no Shutdown: encerrado a pedido.
-    assert_eq!(o.status, AgentStatus::Done { exit_code: None });
+    // Ainda rodando no Shutdown: fica assim, para a próxima abertura reabrir.
+    assert_eq!(o.status, AgentStatus::Running);
     assert_eq!(w.id, worker);
     assert_eq!(w.config, worker_cfg);
     assert_eq!(w.config.parent, Some(orch));
@@ -639,28 +638,53 @@ fn close_interrupted_fixes_sessions_left_open_by_a_crash() {
     assert_eq!(agent(done).status, AgentStatus::Done { exit_code: Some(0) });
 }
 
+/// Fechar o app e cair dão no mesmo: o que estava aberto volta na próxima
+/// abertura, com o último status de cada agente. Sessão encerrada e agente
+/// removido não voltam.
 #[test]
-fn shutdown_only_closes_own_sessions() {
+fn open_sessions_lists_what_to_reopen_after_shutdown_or_crash() {
     let env = Env::new();
-    let old = {
+    let (crashed, live) = {
         let store = env.open();
-        session_created(&store, "de outro processo")
+        let crashed = session_created(&store, "caiu");
+        let live = agent_created(&store, &agent_config(crashed, "a", AgentRole::Worker, None));
+        status(&store, live, AgentStatus::Running);
+        (crashed, live)
+        // drop sem Shutdown = queda
     };
+    let (closed, kept, finished, removed) = {
+        let store = env.open();
+        let closed = session_created(&store, "encerrada");
+        store
+            .record(&AgentEvent::SessionClosed { id: closed })
+            .unwrap();
+        let kept = session_created(&store, "fechou o app");
+        let finished = agent_created(&store, &agent_config(kept, "b", AgentRole::Worker, None));
+        status(&store, finished, AgentStatus::Done { exit_code: Some(0) });
+        let removed = agent_created(&store, &agent_config(kept, "c", AgentRole::Worker, None));
+        store.record(&AgentEvent::Removed { id: removed }).unwrap();
+        store.record(&AgentEvent::Shutdown).unwrap();
+        (closed, kept, finished, removed)
+    };
+
     let store = env.open();
-    let mine = session_created(&store, "minha");
-    store.record(&AgentEvent::Shutdown).unwrap();
-    let history = store.history(10).unwrap();
-    let closed = |id| {
-        history
-            .sessions
-            .iter()
-            .find(|s| s.id == id)
-            .unwrap()
-            .closed_at
-            .is_some()
-    };
-    assert!(closed(mine));
-    assert!(!closed(old));
+    let reopen = store.open_sessions().unwrap();
+    let sessions: Vec<_> = reopen.sessions.iter().map(|s| s.id).collect();
+    assert_eq!(sessions, [crashed, kept], "em ordem de criação");
+    assert!(!sessions.contains(&closed));
+    let agents: Vec<_> = reopen
+        .agents
+        .iter()
+        .map(|a| (a.id, a.status.clone()))
+        .collect();
+    assert_eq!(
+        agents,
+        [
+            (live, AgentStatus::Running),
+            (finished, AgentStatus::Done { exit_code: Some(0) }),
+        ]
+    );
+    assert!(!reopen.agents.iter().any(|a| a.id == removed));
 }
 
 #[test]
