@@ -43,16 +43,27 @@ orquestra/
     ├── browser/  orquestra-browser  Chromium/CDP, screencast, input (chromiumoxide)
     ├── store/    orquestra-store    SQLite, TOML, notificações (rusqlite, toml, notify-rust)
     ├── mcp/      orquestra-mcp      gateway do MCP `orquestra` + ponte stdio e hook (rmcp, alacritty_terminal)
-    └── app/      orquestra-app      binário `orquestra` (eframe/egui, alacritty_terminal)
+    └── app/      orquestra-app      binário `orq` (eframe/egui, alacritty_terminal)
 ```
 
 Os pacotes levam o prefixo `orquestra-`, porque um crate chamado `core`
 sombrearia o `core` da std. `runner`, `browser`, `store` e `mcp` dependem só
-de `core`; `app` depende de todos. O binário tem três modos:
+de `core`; `app` depende de todos. O binário `orq` (com o apelido
+`orquestra`, que só repassa os argumentos) tem três modos:
 
-- `orquestra`: a UI;
-- `orquestra mcp`: a ponte stdio do MCP, que o CLI do orquestrador sobe;
-- `orquestra hook stop`: o hook `Stop` do orquestrador Claude Code.
+- `orq [pasta] [-g objetivo]`: a UI, como o `code .`.
+  - Há uma instância por usuário. Ela segura `ui.lock` e atende `ui.sock` em
+    `$XDG_RUNTIME_DIR/orquestra/`, um pedido JSON por linha (`instance.rs`).
+    Outro `orq` entrega o pedido a ela e sai. Isso também evita que uma
+    segunda instância feche as sessões da primeira como interrompidas.
+  - Sem instância, o `orq` sobe a UI noutro processo, em sessão própria e
+    com o log em `<dados>/orquestra.log`, e devolve o terminal.
+  - A pasta vira a raiz do repositório git. Sem objetivo, abre o diálogo
+    preenchido; com objetivo, já cria a orquestração.
+  - Pedido vindo de outro terminal traz a janela para a frente. No Wayland o
+    compositor não deixa: a janela pede atenção.
+- `orq mcp`: a ponte stdio do MCP, que o CLI do orquestrador sobe;
+- `orq hook stop`: o hook `Stop` do orquestrador Claude Code.
 
 ## 3. Fluxo de dados
 

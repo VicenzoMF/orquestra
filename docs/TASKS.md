@@ -42,6 +42,10 @@ Worktrees em `../orquestra-worktrees/<crate>`, branches `phase1/<crate>`.
       Claude Code roda hooks sem `/dev/tty` (antes o status vinha só da
       heurística de silêncio)
 
+- [x] Comando `orq` como o `code .`: abre o repositório da pasta (diálogo ou, com
+      `-g`, a orquestração), desprende do terminal e reaproveita a janela aberta
+      (instância única por socket); `orquestra` vira apelido
+
 ## Próximos passos sugeridos
 - [ ] Evento `Resized` no core para o gateway acompanhar o tamanho do terminal
 - [ ] Gateway receber a config salva (presets) sem reiniciar
