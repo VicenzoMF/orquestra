@@ -1,11 +1,11 @@
 # orquestra
 
 App desktop leve (Rust + egui) para rodar e acompanhar agentes de código
-(Claude Code, Codex) em paralelo. Um agente orquestrador recebe um objetivo e
-cria os outros pelo MCP `orquestra`; também dá para abrir um agente sozinho em
-qualquer pasta, como uma conversa. Cada agente roda num git worktree próprio
-(numa pasta git) ou direto na pasta
-e pode ter um Chromium só dele, visível e interagível na UI.
+(Claude Code, Codex) em paralelo. Você abre um agente em qualquer pasta, como
+uma conversa; ele pode criar outros agentes pelo MCP `orquestra` e decide
+sozinho quando vale dividir o trabalho. Cada agente roda num git worktree
+próprio (numa pasta git) ou direto na pasta e pode ter um Chromium só dele,
+visível e interagível na UI.
 
 Arquitetura e decisões: `docs/ARCHITECTURE.md`. Tarefas: `docs/TASKS.md`.
 
@@ -18,8 +18,8 @@ cargo install --path crates/app --locked   # instala `orq` (e o apelido `orquest
 Como o `code .` do VS Code:
 
 ```sh
-orq .                                # abre a pasta atual (rascunho no canvas: orquestração ou agente)
-orq ~/projetos/loja -g "implemente o login"   # já começa a orquestração
+orq .                                # abre a pasta atual (rascunho de agente no canvas)
+orq ~/projetos/loja -g "implemente o login"   # já abre um agente com essa tarefa
 orq                                  # só abre (ou traz para a frente) a janela
 orq --mock                           # UI com agentes simulados
 ```

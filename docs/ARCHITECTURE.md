@@ -1,15 +1,17 @@
 # orquestra — arquitetura
 
 App desktop em Rust, leve, para rodar e acompanhar vários agentes de código
-(Claude Code, Codex, shell...) ao mesmo tempo. O trabalho é organizado em
-**orquestrações**. Em cada uma, um agente **orquestrador** recebe um objetivo,
-cria os agentes que executam as tarefas e os acompanha. Tudo aparece num
-**canvas**: cada orquestração é um grupo, o orquestrador está ligado por setas
-aos agentes que criou. Também dá para abrir um agente sozinho numa pasta,
-numa sessão só dele. Cada agente roda num git worktree próprio (numa pasta
-git) ou direto numa pasta qualquer, e pode ter um Chromium próprio, que ele
+(Claude Code, Codex, shell...) ao mesmo tempo. Você abre um **agente** numa
+pasta qualquer, como uma conversa; por padrão ele **pode criar outros
+agentes** e decide sozinho quando vale dividir o trabalho. Tudo aparece num
+**canvas**: cada agente que você abre é uma sessão (um grupo), ligado por
+setas aos agentes que criou. Cada agente roda num git worktree próprio (numa
+pasta git) ou direto numa pasta, e pode ter um Chromium próprio, que ele
 controla via CDP/MCP e que a UI mostra e deixa interagir. O que estiver
 aberto volta quando o app abre de novo, com cada conversa retomada.
+
+No código, quem pode criar agentes ainda se chama `AgentRole::Orchestrator`
+("orquestrador"): é o papel, não um tipo que a pessoa escolhe.
 
 Layout aprovado (canvas interativo, 4 telas):
 https://claude.ai/artifact/5cuERHSaTLUxzXJ6UPsmoa
@@ -24,9 +26,11 @@ Estado: Fases 0, 1 e 2 concluídas (MVP integrado). Como rodar: `README.md`.
    por `broadcast`. A UI nunca chama runner, browser, store ou mcp.
 2. **`core` é o contrato.** Tipos, eventos, comandos, traits e o hub. Nenhuma
    dependência de UI, PTY, CDP, SQLite ou MCP.
-3. **O orquestrador é um agente comum.** É um Claude Code ou Codex que recebeu
-   o MCP `orquestra`. Ele cria agentes mandando os mesmos `Command`s que a UI
-   manda, só que pelo gateway.
+3. **Quem delega é um agente comum.** É um Claude Code ou Codex que recebeu
+   o MCP `orquestra` e, escondidas no prompt de sistema, as instruções de
+   quando delegar. Ele cria agentes mandando os mesmos `Command`s que a UI
+   manda, só que pelo gateway. A primeira mensagem dele é só o que você
+   escreveu.
 4. **Leve por padrão.** eframe com `glow`, Chromium headless e só para quem
    pede, scrollback limitado, screencast desligado fora da tela, limite global
    de agentes simultâneos.
@@ -53,7 +57,7 @@ sombrearia o `core` da std. `runner`, `browser`, `store` e `mcp` dependem só
 de `core`; `app` depende de todos. O binário `orq` (com o apelido
 `orquestra`, que só repassa os argumentos) tem três modos:
 
-- `orq [pasta] [-g objetivo]`: a UI, como o `code .`.
+- `orq [pasta] [-g tarefa]`: a UI, como o `code .`.
   - Há uma instância por usuário. Ela segura `ui.lock` e atende `ui.sock` em
     `$XDG_RUNTIME_DIR/orquestra/`, um pedido JSON por linha (`instance.rs`).
     Outro `orq` entrega o pedido a ela e sai. Isso também evita duas
@@ -61,8 +65,8 @@ de `core`; `app` depende de todos. O binário `orq` (com o apelido
   - Sem instância, o `orq` sobe a UI noutro processo, em sessão própria e
     com o log em `<dados>/orquestra.log`, e devolve o terminal.
   - Qualquer pasta serve; dentro de um repositório git, vale a raiz dele.
-    Sem objetivo, abre o rascunho no canvas já com a pasta; com objetivo, já
-    cria a orquestração.
+    Sem tarefa, abre o rascunho no canvas já com a pasta; com tarefa, já
+    abre um agente com ela.
   - Pedido vindo de outro terminal traz a janela para a frente. No Wayland o
     compositor não deixa: a janela pede atenção.
 - `orq mcp`: a ponte stdio do MCP, que o CLI do orquestrador sobe;
@@ -162,7 +166,10 @@ pub struct Notification { agent, kind: NeedsInput|NeedsApproval|Finished|Failed,
 - `runner {worktree_root, branch_prefix, replay_bytes, idle_ms, kill_grace_ms}`;
 - `browser {executable, headless, viewport, screencast_quality, screencast_every_nth_frame, extra_args, agent_mcp}`;
 - `notifications {enabled, on_waiting_for_input, on_done, on_failed}`;
-- `orchestration {max_concurrent_workers = 8, orchestrator_preset, orchestrator_prompt}`;
+- `orchestration {max_concurrent_workers = 8, orchestrator_preset (tipo padrão
+  de um agente novo), delegation_prompt}`. As instruções de delegação vão
+  escondidas para quem pode criar agentes (`{folder}`, `{name}`), em inglês,
+  como tudo que só o modelo lê (instruções e ferramentas do MCP);
 - `presets`, `recent_repos`.
 
 `HubConfig::from_app(&cfg)` extrai o que o hub usa.
@@ -255,26 +262,25 @@ O modo `--mock` é a mesma montagem com serviços falsos do agente C.
 
 ## 5. Sequências
 
-**Agente sozinho.** No modo Agente do rascunho, a UI manda `CreateSession`
-(uma sessão só dele, sem orquestrador) e `Spawn` do agente, direto na pasta
-ou, se pedido numa pasta git, num worktree.
+**Agente novo.** A pessoa escreve a tarefa (opcional) no rascunho do canvas
+(§6, app) e aperta Enter ou "Iniciar". A UI manda `CreateSession` (uma
+sessão só dele) e `Spawn` do agente (`actions::new_agent`): direto na pasta
+ou, se pedido numa pasta git, num worktree; `initial_prompt` = a tarefa como
+foi escrita. Podendo criar agentes (o padrão, só Claude Code e Codex), ele
+tem `role: Orchestrator`: o hub pede ao gateway um `grant` (credencial, spec
+do MCP `orquestra` e `stop_hook`) e põe em `SpawnRequest.instructions` as
+instruções de delegação; o runner as passa como `--append-system-prompt`
+(Claude Code) ou `-c developer_instructions` (Codex), fora da conversa.
 
-**Nova orquestração.** A pessoa escreve o objetivo no rascunho do canvas
-(§6, app) e aperta Enter ou "Iniciar". A UI manda `CreateSession`. Depois
-manda `Spawn` do
-orquestrador (`role: Orchestrator`, `Workspace::Directory { repo }`,
-`initial_prompt = orchestration.render_prompt(&session)`). O hub pede ao
-gateway um `grant`: credencial, spec do MCP `orquestra` e `stop_hook`. O
-runner registra o MCP na CLI e sobe o processo.
-
-**O orquestrador cria um agente.** O CLI chama
+**Um agente cria outro.** O CLI chama
 `mcp__orquestra__spawn_agent`, que passa por `orquestra mcp` (stdio), pelo
 socket e pelo gateway. O gateway valida contra a sessão (tipos, navegador,
 nome único), monta o `AgentConfig`:
 - `role: Worker`, `parent = orquestrador`;
 - `Workspace::Worktree` (`workspace: "worktree"`, o padrão numa pasta git) ou
-  `Workspace::Directory` (`workspace: "pasta"`, o padrão fora de um
-  repositório); `dir` troca a pasta da sessão por qualquer outra;
+  `Workspace::Directory` (`workspace: "folder"`, o padrão fora de um
+  repositório); `dir` troca a pasta da sessão por qualquer outra. Quem é
+  criado assim não cria outros (um nível só);
 - `initial_prompt = tarefa`.
 
 Então manda `Command::Spawn`. O hub publica `Created` (a UI desenha o nó e a
@@ -456,36 +462,37 @@ sem `closed_at` e os agentes não removidos, com o último status. O app manda
     vertical) desce só na exibição, sem mudar a posição guardada, e volta
     quando a de cima encolhe.
   - Botão direito no fundo (também dentro de uma moldura, fora dos cards)
-    abre um menu: "Iniciar novo agente orquestrador" e "Iniciar novo agente".
-  - **Rascunho** (`ui/draft.rs`), de orquestração ou de agente (o modo
-    troca no topo da janela). Agente: tarefa opcional, tipo (qualquer
-    preset), pasta, worktree (só numa pasta git) e navegador. Uma janela no estilo dos
+    abre um menu: "Iniciar novo agente".
+  - **Rascunho "Novo agente"** (`ui/draft.rs`): uma janela no estilo dos
     cards, desenhada dentro da `Scene`, então acompanha pan e zoom. Abre no
-    ponto do botão direito ou, por "+ Nova orquestração", Ctrl+Shift+N e
+    ponto do botão direito ou, por "+ Novo agente", Ctrl+Shift+N e
     `orq <pasta>`, no centro da área visível. Há um por vez: abrir de novo
     só o reposiciona, com o texto. Enquanto ele está aberto, o canvas não se
     reajusta sozinho; com zoom abaixo de 80%, ele abre aproximando a vista.
-    - Compacto: objetivo (Enter inicia, Shift+Enter quebra a linha, Esc
-      cancela) e um resumo como `~/projetos/loja · Claude Code`.
-    - "Mostrar mais opções": orquestrador, pasta (com os recentes), limite de
-      agentes simultâneos, tipos de agente, navegador e aprovação. Sem pasta
-      recente, ele já abre assim.
+    - Compacto: tarefa, opcional (Enter inicia, Shift+Enter quebra a linha,
+      Esc cancela), e um resumo como `~/projetos/loja · Claude Code`.
+    - "Mostrar mais opções": tipo, pasta (com os recentes), worktree (só
+      numa pasta git), navegador e "Pode criar outros agentes" (ligado; só
+      Claude Code e Codex), com as regras para os que ele criar: limite
+      simultâneo, tipos, navegador e aprovação. Sem pasta recente, ele já
+      abre assim.
     - Sem ComboBox lá dentro: o popup sai no lugar certo, mas em escala 1:1,
-      e destoa da janela com zoom. Preset e recentes são escolhas inline.
+      e destoa da janela com zoom. Tipo e recentes são escolhas inline.
     - "Iniciar" manda `CreateSession` + `Spawn`, guarda a posição da sessão
-      nova (o `SessionId` vem de `actions::new_orchestration`), seleciona o
-      orquestrador e põe a pasta nos recentes. A vista não se mexe e o
-      ajuste automático segue desligado: a orquestração aparece onde a janela
-      estava.
-- **Topo.** Pills de sessão (Todas / cada sessão, com resumo), "+ Novo
-  agente" e "+ Nova orquestração" (abrem o rascunho no canvas).
+      nova, seleciona o agente e põe a pasta nos recentes. A vista não se
+      mexe e o ajuste automático segue desligado: a sessão aparece onde a
+      janela estava.
+  - Quem pode criar agentes tem o card maior (estrela, tarefa, progresso dos
+    que criou e um campo "Fale com o agente…").
+- **Topo.** Pills de sessão (Todas / cada sessão, com resumo) e "+ Novo
+  agente" (abre o rascunho no canvas).
 - **"+ Agente na sessão"** (barra do canvas): mais um agente numa sessão
   aberta, direto na pasta dela ou num worktree (pasta git).
 - **Painéis flutuantes** (`ui/overlay`), fixos na tela sobre o canvas; o
   enquadramento automático deixa livres as faixas de cima e de baixo (e não
   aproxima além de 100%; o zoom manual vai até 150%):
   - **Sessões** (canto de cima à esquerda): um botão que abre a lista, uma
-    sessão de cada vez (cascata), com focar, orquestrador e encerrar. Esc ou
+    sessão de cada vez (cascata), com focar, o agente dela e encerrar. Esc ou
     clique no canvas fecha;
   - **Precisa de você** (canto de cima à direita, recolhível; só aparece com
     algo pendente): input, aprovação e falhas de todas as sessões;
@@ -502,7 +509,7 @@ sem `closed_at` e os agentes não removidos, com o último status. O app manda
 - **Navegador.** O JPEG é decodificado fora da thread de UI. A textura só é
   atualizada quando chega quadro novo. O input passa por `to_viewport`.
   `SetBrowserVisible` liga e desliga o screencast conforme o painel.
-- **Atalhos.** Ctrl+Shift+N (rascunho de orquestração), Ctrl+Shift+↑/↓
+- **Atalhos.** Ctrl+Shift+N (novo agente), Ctrl+Shift+↑/↓
   (agente), Ctrl+Shift+B (navegador), Esc (fecha o rascunho ou a seleção).
   Com o terminal em foco, tudo mais vai para o PTY.
 
@@ -512,18 +519,18 @@ Referência visual: o canvas do link no topo do documento. Esboço da tela
 principal:
 
 ```
-┌ orquestra  [Todas][loja · 1 aguardando][blog · 1 falhou] [+ Novo agente][+ Nova orquestração] [cfg] ┐
+┌ orquestra  [Todas][loja · 1 aguardando][blog · 1 falhou]            [+ Novo agente]      [cfg] ┐
 ├ Visão geral  [- 70% +] [Ajustar]                         ● rodando ● aguardando ✓ ✕ ◌ ┤
 │ (≡ Sessões 2 ∨)                                          ┌ ● Precisa de você 2    ∧ ┐ │
 │      ┌ loja · login + produtos ───────────────────────────┐│ ● login-ui  loja         │ │
-│      │ ┌ orquestrador ──────┐     ┌ ● login-ui aguardando ┐││  Permitir npm install?  │ │
+│      │ ┌ ★ claude-code ─────┐     ┌ ● login-ui aguardando ┐││  Permitir npm install?  │ │
 │      │ │ Claude Code ● rod. │──┬─▶│   Permitir npm…       │││  [Sim] [Não] [Terminal] │ │
 │      │ │ objetivo / plano   │  ├─▶│ ✓ api        pronto   │││ ✕ estilos  blog         │ │
 │      │ │ [fale com ele…]    │  └─▶│ ● qa-navegador :41745 │││  [Terminal] [Remover…]  │ │
 │      │ └────────────────────┘     └───────────────────────┘│└──────────────────────────┘ │
 │      └────────────────────────────────────────────────────┘                             │
 │      ┌ blog · migração para Astro ────────────────────────┐                             │
-│      │ orquestrador Codex ──┬──▶ migra-posts / ✕ estilos  │                             │
+│      │ ★ codex ─────────────┬──▶ migra-posts / ✕ estilos  │                             │
 │      └────────────────────────────────────────────────────┘                             │
 │                                              (vagas ▮▮▮▮▯▯▯▯ 4/8 · 1 navegador · 52 MB) │
 ├─────────────────────────────────────────────────────────────────────────────────────────┤

@@ -63,6 +63,12 @@ Worktrees em `../orquestra-worktrees/<crate>`, branches `phase1/<crate>`.
       Claude real); Codex por `resume --last`; posições do canvas em
       `canvas.json`
 
+- [x] Sem "orquestrador" à parte: um só "Novo agente", que por padrão pode
+      criar outros e decide quando delegar. A primeira mensagem é só a
+      tarefa; as instruções de delegação (em inglês) vão escondidas no
+      prompt de sistema (`--append-system-prompt` / `developer_instructions`),
+      testado com o Claude real. Instruções e ferramentas do MCP em inglês
+
 ## Próximos passos sugeridos
 - [ ] Testar a reabertura com o Codex real
 - [ ] Evento `Resized` no core para o gateway acompanhar o tamanho do terminal
