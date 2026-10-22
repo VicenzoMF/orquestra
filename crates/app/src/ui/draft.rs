@@ -13,7 +13,7 @@ use egui::{
     Align, DragValue, FontId, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, Painter,
     Pos2, Rect, RichText, Sense, Stroke, TextEdit, Ui, UiBuilder, Vec2, pos2, vec2,
 };
-use orquestra_core::{AgentKind, AgentPreset, AppConfig, SessionConfig};
+use orquestra_core::{AgentKind, AgentPreset, AppConfig, SessionConfig, SessionId};
 
 use super::widgets::{self, kind_label};
 use super::{Action, Ctx, UiState};
@@ -44,6 +44,8 @@ pub struct Draft {
     pub resume_fit: bool,
     /// Retângulo do último frame.
     rect: Rect,
+    /// Onde a janela estava ao começar a arrastar o título.
+    drag_from: Option<Pos2>,
 }
 
 /// O que a pessoa fez no rascunho neste frame.
@@ -79,6 +81,7 @@ impl Draft {
             focus_goal: true,
             resume_fit,
             rect: Rect::NOTHING,
+            drag_from: None,
         }
     }
 
@@ -151,16 +154,16 @@ impl Draft {
     }
 
     /// Manda `CreateSession` + `Spawn` do orquestrador e seleciona ele.
-    pub fn start(&self, cx: &Ctx, st: &mut UiState) -> Option<Action> {
+    pub fn start(&self, cx: &Ctx, st: &mut UiState) -> Option<(SessionId, Action)> {
         let (session, preset) = self.session(cx.config).ok()?;
         let repo = session.repo.clone();
-        let (_, orchestrator, commands) =
+        let (id, orchestrator, commands) =
             actions::new_orchestration(cx.config, session, preset, st.spawn_size());
         for c in commands {
             cx.send(c);
         }
         st.select_new(orchestrator);
-        Some(Action::Created { repo })
+        Some((id, Action::Created { repo }))
     }
 
     /// Desenha a janela na `Scene`, em `self.at`.
@@ -199,7 +202,19 @@ impl Draft {
         inactive.bg_fill = theme::TERM_BG;
         inactive.weak_bg_fill = theme::PANEL;
 
-        let (title, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+        // Arrastar o título move a janela no canvas.
+        let (title, grab) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::drag());
+        match grab.total_drag_delta() {
+            Some(total) => {
+                let from = *self.drag_from.get_or_insert(self.at);
+                self.at = from + total;
+                grab.on_hover_and_drag_cursor(egui::CursorIcon::Grabbing);
+            }
+            None => {
+                self.drag_from = None;
+                grab.on_hover_cursor(egui::CursorIcon::Grab);
+            }
+        }
         let painter = ui.painter();
         theme::paint_star(
             painter,

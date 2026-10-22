@@ -553,6 +553,24 @@ mod tests {
         frame_with(ctx, app, vec![event(false)]);
     }
 
+    /// Arrasta com o botão principal de `from` a `to`, em alguns frames.
+    fn drag(ctx: &egui::Context, app: &mut OrquestraApp, from: Pos2, to: Pos2) {
+        let button = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        frame_with(ctx, app, vec![Event::PointerMoved(from)]);
+        frame_with(ctx, app, vec![button(from, true)]);
+        for t in [0.1, 0.4, 0.7, 1.0] {
+            let pos = from + (to - from) * t;
+            frame_with(ctx, app, vec![Event::PointerMoved(pos)]);
+        }
+        frame_with(ctx, app, vec![button(to, false)]);
+        frame(ctx, app);
+    }
+
     fn wait_sessions(ctx: &egui::Context, app: &mut OrquestraApp, shared: &Shared, n: usize) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while shared.model().sessions().len() < n {
@@ -681,9 +699,13 @@ mod tests {
             Modifiers::COMMAND | Modifiers::SHIFT,
         );
         frame(&ctx, &mut app);
+        // A moldura da sessão nova fica onde estava a janela.
+        let at = pos2(640.0, 420.0);
+        app.canvas.draft_mut().unwrap().at = at;
         key(&ctx, &mut app, Key::Enter, Modifiers::NONE);
         assert!(app.canvas.draft().is_none(), "Enter não iniciou");
         wait_sessions(&ctx, &mut app, &shared, 1);
+        frame(&ctx, &mut app);
         {
             let model = shared.model();
             let session = &model.sessions()[0];
@@ -691,6 +713,9 @@ mod tests {
             assert_eq!(session.config.goal, "login\ncom e-mail");
             assert_eq!(session.config.name, "loja · login");
             assert_eq!(app.st.selected, session.orchestrator);
+            assert_eq!(app.canvas.position(session.id), Some(at));
+            let frame = app.canvas.session_frame(&model, session.id).unwrap();
+            assert_eq!(frame.min, at);
         }
         assert_eq!(app.config.recent_repos[0], PathBuf::from("/src/loja"));
 
@@ -751,6 +776,90 @@ mod tests {
         shutdown(&runtime, &cmd, hub);
     }
 
+    /// Arrastar o cabeçalho de uma moldura move a sessão sem fazer pan (e
+    /// arrastar o fundo faz); clique simples no cabeçalho continua focando.
+    /// Arrastar o título do rascunho move o rascunho.
+    #[test]
+    fn dragging_headers_moves_sessions_and_the_draft() {
+        let runtime = runtime();
+        let (ctx, mut app, shared, cmd, hub) = mock_app(&runtime, false);
+        frame(&ctx, &mut app);
+        // Com objetivo: entra sem posição e ganha uma automática, em (0, 0).
+        shared.push_open(
+            OpenRequest {
+                repo: Some("/src/loja".into()),
+                goal: Some("login".to_owned()),
+            },
+            false,
+        );
+        wait_sessions(&ctx, &mut app, &shared, 1);
+        // O orquestrador chega depois da sessão e mexe no ajuste automático.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while shared.model().agent_count() < 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "orquestrador não chegou"
+            );
+            frame(&ctx, &mut app);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for _ in 0..3 {
+            frame(&ctx, &mut app);
+        }
+        let id = shared.model().sessions()[0].id;
+        assert_eq!(app.canvas.position(id), Some(Pos2::ZERO));
+        app.st.selected = None;
+        frame(&ctx, &mut app);
+
+        let view = app.canvas.scene_rect;
+        let zoom = app.canvas.zoom;
+        let grab = app.canvas.to_screen(pos2(300.0, 14.0));
+        drag(&ctx, &mut app, grab, grab + vec2(120.0, 80.0));
+        let moved = app.canvas.position(id).unwrap();
+        let expected = vec2(120.0, 80.0) / zoom;
+        assert!(
+            (moved.to_vec2() - expected).length() < 1.0,
+            "foi para {moved:?}, esperava {expected:?}"
+        );
+        assert_eq!(app.canvas.scene_rect, view, "o canvas fez pan");
+        assert_eq!(app.st.focus, None, "arrastar não é clique");
+        let frame_now = app.canvas.session_frame(&shared.model(), id).unwrap();
+        assert_eq!(frame_now.min, moved);
+
+        // Clique simples no cabeçalho foca, como antes.
+        let header = app.canvas.to_screen(moved + vec2(300.0, 14.0));
+        click(&ctx, &mut app, header, PointerButton::Primary);
+        assert_eq!(app.st.focus, Some(id));
+        app.st.focus = None;
+
+        // Arrastar o fundo, longe da moldura, faz pan e não move a sessão.
+        let empty = app
+            .canvas
+            .to_screen(moved + vec2(0.0, frame_now.height() + 60.0));
+        drag(&ctx, &mut app, empty, empty + vec2(-50.0, -30.0));
+        assert_ne!(app.canvas.scene_rect, view, "o fundo não fez pan");
+        assert_eq!(app.canvas.position(id), Some(moved));
+
+        // O título do rascunho arrasta a janela.
+        app.canvas.open_draft(&app.config);
+        frame(&ctx, &mut app);
+        frame(&ctx, &mut app);
+        let view = app.canvas.scene_rect;
+        let zoom = app.canvas.zoom;
+        let before = app.canvas.draft().unwrap().at;
+        let title = app.canvas.to_screen(before + vec2(150.0, 24.0));
+        drag(&ctx, &mut app, title, title + vec2(-90.0, 60.0));
+        let after = app.canvas.draft().unwrap().at;
+        let expected = vec2(-90.0, 60.0) / zoom;
+        assert!(
+            (after - before - expected).length() < 1.0,
+            "rascunho foi de {before:?} para {after:?}"
+        );
+        assert_eq!(app.canvas.scene_rect, view);
+
+        shutdown(&runtime, &cmd, hub);
+    }
+
     /// A UI inteira, sem janela, sobre o hub real com os mocks semeados:
     /// canvas, painel com terminal e navegador, foco de sessão, rascunho e
     /// diálogos.
@@ -769,6 +878,28 @@ mod tests {
         for _ in 0..3 {
             frame(&ctx, &mut app);
         }
+
+        // A segunda sessão posta à direita da primeira fica lá; posta por
+        // cima dela, desce só na exibição (a posição guardada não muda).
+        let (a, b) = {
+            let model = shared.model();
+            (model.sessions()[0].id, model.sessions()[1].id)
+        };
+        let fa = app.canvas.session_frame(&shared.model(), a).unwrap();
+        let right = pos2(fa.right() + 80.0, fa.top());
+        app.canvas.set_position(b, right);
+        frame(&ctx, &mut app);
+        let fb = app.canvas.session_frame(&shared.model(), b).unwrap();
+        assert_eq!(fb.min, right);
+        let over = fa.min + vec2(100.0, 60.0);
+        app.canvas.set_position(b, over);
+        frame(&ctx, &mut app);
+        let fb = app.canvas.session_frame(&shared.model(), b).unwrap();
+        assert_eq!(fb.left(), over.x);
+        assert_eq!(fb.top(), fa.bottom() + crate::layout::SESSION_GAP);
+        assert_eq!(app.canvas.position(b), Some(over));
+        app.canvas.request_fit();
+        frame(&ctx, &mut app);
 
         // Seleciona o agente com navegador: terminal redimensiona ao painel.
         let qa = {

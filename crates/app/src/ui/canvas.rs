@@ -1,10 +1,13 @@
-//! Canvas com pan/zoom (`egui::Scene`): uma moldura por sessão, orquestrador
-//! à esquerda, workers em coluna, ligados por linhas ortogonais na cor do
-//! status do filho. O botão direito no fundo abre um menu; o rascunho de
-//! orquestração (`draft.rs`) fica ancorado aqui.
+//! Canvas com pan/zoom (`egui::Scene`): uma moldura por sessão, onde a
+//! pessoa a pôs (arrastando o cabeçalho), com o orquestrador à esquerda e os
+//! workers em coluna, ligados por linhas ortogonais na cor do status do
+//! filho. O botão direito no fundo abre um menu; o rascunho de orquestração
+//! (`draft.rs`) fica ancorado aqui.
 
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Id, Key, Layout, Margin, Pos2, Rect, RichText,
@@ -36,6 +39,8 @@ const DETAIL_ON: f32 = 0.8;
 const DETAIL_OFF: f32 = 0.65;
 /// Abaixo deste zoom o rascunho abre aproximando a vista para 100%.
 const DRAFT_MIN_ZOOM: f32 = 0.8;
+/// Quanto a posição de uma sessão pedida ao hub espera ela chegar ao modelo.
+const PENDING_TTL: Duration = Duration::from_secs(10);
 
 pub struct CanvasState {
     pub scene_rect: Rect,
@@ -52,6 +57,22 @@ pub struct CanvasState {
     place_draft: Option<Placement>,
     /// Ponto do último botão direito no fundo, em coordenadas do canvas.
     menu_at: Pos2,
+    /// Canto da moldura de cada sessão, em coordenadas do canvas. Só no app:
+    /// as sessões não sobrevivem a um reinício.
+    positions: HashMap<SessionId, Pos2>,
+    /// Sessões pedidas ao hub que ainda não chegaram ao modelo.
+    pending: HashMap<SessionId, Instant>,
+    /// Sessão arrastada pelo cabeçalho e onde a moldura estava ao começar.
+    dragging: Option<(SessionId, Pos2)>,
+}
+
+/// O cabeçalho de uma moldura está sendo arrastado neste frame.
+struct HeaderDrag {
+    session: SessionId,
+    /// Moldura como aparece agora (já com empurrões).
+    frame_min: Pos2,
+    /// Desde que o botão desceu, em coordenadas do canvas.
+    total: Vec2,
 }
 
 #[derive(Clone, Copy)]
@@ -80,6 +101,9 @@ impl Default for CanvasState {
             draft: None,
             place_draft: None,
             menu_at: Pos2::ZERO,
+            positions: HashMap::new(),
+            pending: HashMap::new(),
+            dragging: None,
         }
     }
 }
@@ -88,6 +112,41 @@ impl CanvasState {
     pub fn request_fit(&mut self) {
         self.auto_fit = true;
         self.fit_now = true;
+    }
+
+    /// Põe a moldura de uma sessão com o canto em `at`.
+    #[cfg(any(test, feature = "screenshot"))]
+    pub fn set_position(&mut self, id: SessionId, at: Pos2) {
+        self.positions.insert(id, at);
+    }
+
+    #[cfg(test)]
+    pub fn position(&self, id: SessionId) -> Option<Pos2> {
+        self.positions.get(&id).copied()
+    }
+
+    /// Moldura da sessão como o canvas a mostra (com foco nenhum).
+    #[cfg(test)]
+    pub fn session_frame(&self, model: &Model, id: SessionId) -> Option<Rect> {
+        let detailed = self.detailed;
+        let l = layout::layout(&specs(model, &self.positions, |_| detailed));
+        l.session(id).map(|s| s.frame)
+    }
+
+    /// Esquece quem saiu do modelo e dá uma posição fixa, na primeira vez, a
+    /// quem chegou sem uma (x = 0, abaixo da moldura mais baixa).
+    fn sync_positions(&mut self, model: &Model, detailed: impl Fn(SessionId) -> bool) {
+        let live: HashSet<SessionId> = model.sessions().iter().map(|s| s.id).collect();
+        self.pending
+            .retain(|id, since| !live.contains(id) && since.elapsed() < PENDING_TTL);
+        self.positions
+            .retain(|id, _| live.contains(id) || self.pending.contains_key(id));
+        if live.iter().any(|id| !self.positions.contains_key(id)) {
+            let l = layout::layout(&specs(model, &self.positions, detailed));
+            for s in l.sessions {
+                self.positions.entry(s.id).or_insert(s.frame.min);
+            }
+        }
     }
 
     /// Abre o rascunho no centro da área visível; se já há um, traz ele para
@@ -232,7 +291,11 @@ fn worker_size(agent: &AgentView, detailed: bool) -> Vec2 {
     vec2(WORKER_W, h)
 }
 
-fn specs(model: &Model, detailed: impl Fn(SessionId) -> bool) -> Vec<SessionSpec> {
+fn specs(
+    model: &Model,
+    positions: &HashMap<SessionId, Pos2>,
+    detailed: impl Fn(SessionId) -> bool,
+) -> Vec<SessionSpec> {
     model
         .sessions()
         .into_iter()
@@ -240,7 +303,7 @@ fn specs(model: &Model, detailed: impl Fn(SessionId) -> bool) -> Vec<SessionSpec
             let d = detailed(s.id);
             SessionSpec {
                 id: s.id,
-                origin: None,
+                origin: positions.get(&s.id).copied(),
                 nodes: model
                     .agents_of(s.id)
                     .into_iter()
@@ -274,7 +337,9 @@ fn structure_hash(model: &Model) -> u64 {
 
 fn fit(cs: &mut CanvasState, model: &Model, focus: Option<SessionId>, outer: Rect) {
     let target = |detailed: bool| {
-        let l = layout::layout(&specs(model, |s| detailed || focus == Some(s)));
+        let l = layout::layout(&specs(model, &cs.positions, |s| {
+            detailed || focus == Some(s)
+        }));
         let rect = focus
             .and_then(|f| l.session(f).map(|s| s.frame))
             .unwrap_or(l.bounds)
@@ -319,6 +384,9 @@ pub fn show(
             cs.fit_now = true;
         }
     }
+    let focus = st.focus;
+    let detailed = cs.detailed;
+    cs.sync_positions(cx.model, |s| detailed || focus == Some(s));
     if cs.fit_now {
         fit(cs, cx.model, st.focus, outer);
     }
@@ -326,8 +394,9 @@ pub fn show(
         cs.place(place);
     }
     let detailed = cs.detailed;
-    let focus = st.focus;
-    let layout = layout::layout(&specs(cx.model, |s| detailed || focus == Some(s)));
+    let layout = layout::layout(&specs(cx.model, &cs.positions, |s| {
+        detailed || focus == Some(s)
+    }));
 
     let mut scene_rect = cs.scene_rect;
     let zoom = cs.zoom;
@@ -336,12 +405,29 @@ pub fn show(
         .zoom_range(ZOOM_MIN..=ZOOM_MAX)
         .max_inner_size(Vec2::splat(100_000.0))
         .show(ui, &mut scene_rect, |ui| {
-            draw(ui, cx, st, res, &layout, detailed, zoom, draft.is_none());
+            let drag = draw(ui, cx, st, res, &layout, detailed, zoom, draft.is_none());
             // Depois dos cards: fica por cima deles no desenho e no clique.
-            draft.as_mut().and_then(|d| d.show(ui, cx))
+            (drag, draft.as_mut().and_then(|d| d.show(ui, cx)))
         });
     let response = scene.response;
+    let (drag, event) = scene.inner;
     cs.scene_rect = scene_rect;
+
+    // A posição guardada parte de onde a moldura aparecia ao começar.
+    match drag {
+        Some(d) => {
+            let from = match cs.dragging {
+                Some((id, from)) if id == d.session => from,
+                _ => {
+                    cs.auto_fit = false;
+                    d.frame_min
+                }
+            };
+            cs.dragging = Some((d.session, from));
+            cs.positions.insert(d.session, from + d.total);
+        }
+        None => cs.dragging = None,
+    }
     if response.changed() {
         cs.auto_fit = false;
         cs.update_detail(effective_zoom(outer, scene_rect));
@@ -369,18 +455,21 @@ pub fn show(
         }
     }
 
-    match scene.inner? {
+    match event? {
         draft::Event::Cancel => {
             cs.cancel_draft();
             None
         }
         draft::Event::Start => {
-            let action = cs.draft.as_ref()?.start(cx, st);
-            if action.is_some() {
-                cs.draft = None;
-                cs.place_draft = None;
-            }
-            action
+            // A moldura da sessão nova fica onde estava a janela.
+            let draft = cs.draft.as_ref()?;
+            let at = draft.at;
+            let (session, action) = draft.start(cx, st)?;
+            cs.positions.insert(session, at);
+            cs.pending.insert(session, Instant::now());
+            cs.draft = None;
+            cs.place_draft = None;
+            Some(action)
         }
     }
 }
@@ -490,11 +579,11 @@ fn draw(
     detailed: bool,
     zoom: f32,
     empty_hint: bool,
-) {
+) -> Option<HeaderDrag> {
     dots(ui.painter(), ui.clip_rect(), zoom);
     if layout.sessions.is_empty() {
         if !empty_hint {
-            return;
+            return None;
         }
         let c = layout.bounds.center();
         let painter = ui.painter();
@@ -519,31 +608,36 @@ fn draw(
             FontId::proportional(12.5),
             theme::TEXT_DIM,
         );
-        return;
+        return None;
     }
     let visible = ui.clip_rect();
+    let mut drag = None;
     for sl in &layout.sessions {
         let Some(session) = cx.model.session(sl.id) else {
             continue;
         };
         let dim = st.focus.is_some_and(|f| f != sl.id);
         let session_detailed = detailed || st.focus == Some(sl.id);
-        ui.scope(|ui| {
-            if dim {
-                ui.multiply_opacity(0.3);
-            }
-            draw_session(
-                ui,
-                cx,
-                st,
-                res,
-                session,
-                sl,
-                session_detailed && !dim,
-                visible,
-            );
-        });
+        let dragged = ui
+            .scope(|ui| {
+                if dim {
+                    ui.multiply_opacity(0.3);
+                }
+                draw_session(
+                    ui,
+                    cx,
+                    st,
+                    res,
+                    session,
+                    sl,
+                    session_detailed && !dim,
+                    visible,
+                )
+            })
+            .inner;
+        drag = drag.or(dragged);
     }
+    drag
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -556,7 +650,7 @@ fn draw_session(
     sl: &SessionLayout,
     detailed: bool,
     visible: Rect,
-) {
+) -> Option<HeaderDrag> {
     let painter = ui.painter().clone();
     let frame = sl.frame;
     painter.rect(
@@ -567,12 +661,13 @@ fn draw_session(
         StrokeKind::Inside,
     );
 
-    // Cabeçalho: nome, repositório e resumo. Clique foca a sessão.
+    // Cabeçalho: nome, repositório e resumo. Clique foca a sessão; arrastar
+    // move a moldura inteira (o canvas não faz pan).
     let header = Rect::from_min_size(frame.min, vec2(frame.width(), layout::HEADER_H - 8.0));
     let header_resp = ui.interact(
         header,
         Id::unique(("session-header", sl.id)),
-        Sense::click(),
+        Sense::click_and_drag(),
     );
     if header_resp.clicked() {
         st.focus = if st.focus == Some(sl.id) {
@@ -581,8 +676,18 @@ fn draw_session(
             Some(sl.id)
         };
     }
-    let header_resp = header_resp.on_hover_text("Clique para focar esta orquestração");
-    let _ = header_resp;
+    let drag = header_resp.total_drag_delta().map(|total| HeaderDrag {
+        session: sl.id,
+        frame_min: frame.min,
+        total,
+    });
+    if drag.is_some() {
+        header_resp.on_hover_and_drag_cursor(egui::CursorIcon::Grabbing);
+    } else {
+        header_resp
+            .on_hover_cursor(egui::CursorIcon::Grab)
+            .on_hover_text("Clique para focar; arraste para mover");
+    }
     let y = frame.top() + 22.0;
     let name_rect = painter.text(
         pos2(frame.left() + 18.0, y),
@@ -649,6 +754,7 @@ fn draw_session(
             worker_card(ui, cx, st, res, agent, *rect, detailed);
         }
     }
+    drag
 }
 
 fn draw_edge(painter: &egui::Painter, edge: &Edge, child: &AgentView) {
