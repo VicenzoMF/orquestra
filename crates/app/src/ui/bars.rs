@@ -67,10 +67,10 @@ pub fn top_bar(
             ui.add_space(4.0);
             if ui
                 .add(widgets::accent_button("+ Nova orquestração"))
-                .on_hover_text("Ctrl+Shift+N")
+                .on_hover_text("Abre um rascunho no canvas (Ctrl+Shift+N)")
                 .clicked()
             {
-                dialogs.open_new_orchestration(cx.config);
+                canvas.open_draft(cx.config);
             }
         });
     });

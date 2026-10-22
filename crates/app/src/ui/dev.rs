@@ -6,7 +6,9 @@
 //! - `ORQUESTRA_DEMO_SELECT=nome`: seleciona o agente com esse nome;
 //! - `ORQUESTRA_DEMO_TAB=navegador`: abre a aba do navegador;
 //! - `ORQUESTRA_DEMO_FOCUS=prefixo`: foca a sessão cujo nome começa assim;
-//! - `ORQUESTRA_DEMO_DIALOG=nova|avulso|config`: abre um diálogo.
+//! - `ORQUESTRA_DEMO_DIALOG=nova|nova-mais|avulso|config`: abre o rascunho
+//!   de orquestração no canvas (`nova-mais`: com todas as opções) ou um
+//!   diálogo.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -69,7 +71,22 @@ impl DevHooks {
         if !self.prepared && elapsed >= self.delay.mul_f64(0.7) {
             self.prepared = true;
             match self.dialog.as_deref() {
-                Some("nova") => dialogs.open_new_orchestration(cx.config),
+                Some(which @ ("nova" | "nova-mais")) => {
+                    // O `--mock` não tem recentes: usa a pasta da primeira sessão.
+                    let repo = cx
+                        .config
+                        .recent_repos
+                        .first()
+                        .cloned()
+                        .or_else(|| model.sessions().first().map(|s| s.config.repo.clone()));
+                    match repo {
+                        Some(repo) => canvas.open_draft_in(cx.config, &repo),
+                        None => canvas.open_draft(cx.config),
+                    }
+                    if let Some(d) = canvas.draft_mut() {
+                        d.more = which == "nova-mais";
+                    }
+                }
                 Some("avulso") => dialogs.open_solo(cx, st),
                 Some("config") => dialogs.open_settings(cx.config),
                 _ => {}

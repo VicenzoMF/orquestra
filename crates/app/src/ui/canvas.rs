@@ -1,17 +1,20 @@
 //! Canvas com pan/zoom (`egui::Scene`): uma moldura por sessão, orquestrador
 //! à esquerda, workers em coluna, ligados por linhas ortogonais na cor do
-//! status do filho.
+//! status do filho. O botão direito no fundo abre um menu; o rascunho de
+//! orquestração (`draft.rs`) fica ancorado aqui.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::Path;
 
 use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Id, Key, Layout, Margin, Pos2, Rect, RichText,
     Scene, Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, Vec2, pos2, vec2,
 };
-use orquestra_core::{AgentStatus, Command, QueueReason, SessionId};
+use orquestra_core::{AgentStatus, AppConfig, Command, QueueReason, SessionId};
 
+use super::draft::{self, Draft};
 use super::widgets::{self, kind_label, paint_elided};
-use super::{Ctx, Resources, UiState};
+use super::{Action, Ctx, Resources, UiState};
 use crate::actions;
 use crate::browser::fit_rect;
 use crate::layout::{self, ANCHOR_Y, CanvasLayout, Edge, NodeSpec, SessionLayout, SessionSpec};
@@ -31,6 +34,8 @@ const ZOOM_MAX: f32 = 1.5;
 /// Histerese do modo detalhado conforme o zoom.
 const DETAIL_ON: f32 = 0.8;
 const DETAIL_OFF: f32 = 0.65;
+/// Abaixo deste zoom o rascunho abre aproximando a vista para 100%.
+const DRAFT_MIN_ZOOM: f32 = 0.8;
 
 pub struct CanvasState {
     pub scene_rect: Rect,
@@ -41,6 +46,25 @@ pub struct CanvasState {
     pub zoom: f32,
     structure: u64,
     viewport: Rect,
+    /// Rascunho de orquestração (um por vez).
+    draft: Option<Draft>,
+    /// Onde pôr o rascunho, resolvido no próximo frame depois do ajuste.
+    place_draft: Option<Placement>,
+    /// Ponto do último botão direito no fundo, em coordenadas do canvas.
+    menu_at: Pos2,
+}
+
+#[derive(Clone, Copy)]
+enum Placement {
+    /// Centro da área visível.
+    Center,
+    /// Canto superior esquerdo neste ponto do canvas.
+    At(Pos2),
+}
+
+/// Itens do menu do botão direito no fundo do canvas.
+enum MenuChoice {
+    NewOrchestrator,
 }
 
 impl Default for CanvasState {
@@ -53,6 +77,9 @@ impl Default for CanvasState {
             zoom: 1.0,
             structure: 0,
             viewport: Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0)),
+            draft: None,
+            place_draft: None,
+            menu_at: Pos2::ZERO,
         }
     }
 }
@@ -61,6 +88,100 @@ impl CanvasState {
     pub fn request_fit(&mut self) {
         self.auto_fit = true;
         self.fit_now = true;
+    }
+
+    /// Abre o rascunho no centro da área visível; se já há um, traz ele para
+    /// lá com o texto.
+    pub fn open_draft(&mut self, config: &AppConfig) {
+        self.open_draft_with(config, None, Placement::Center);
+    }
+
+    /// Rascunho já com esta pasta (`orq <pasta>`): falta só o objetivo.
+    pub fn open_draft_in(&mut self, config: &AppConfig, repo: &Path) {
+        self.open_draft_with(config, Some(repo), Placement::Center);
+    }
+
+    fn open_draft_with(&mut self, config: &AppConfig, repo: Option<&Path>, place: Placement) {
+        match self.draft.as_mut() {
+            Some(d) => {
+                if let Some(repo) = repo {
+                    d.set_repo(repo);
+                }
+                d.focus_goal();
+            }
+            None => self.draft = Some(Draft::new(config, repo, self.auto_fit)),
+        }
+        self.place_draft = Some(place);
+        // A vista não pula enquanto a pessoa digita.
+        self.auto_fit = false;
+    }
+
+    /// Fecha o rascunho sem criar nada; devolve se havia um.
+    pub fn cancel_draft(&mut self) -> bool {
+        let Some(d) = self.draft.take() else {
+            return false;
+        };
+        self.place_draft = None;
+        if d.resume_fit {
+            self.request_fit();
+        }
+        true
+    }
+
+    #[cfg(test)]
+    pub fn draft(&self) -> Option<&Draft> {
+        self.draft.as_ref()
+    }
+
+    #[cfg(any(test, feature = "screenshot"))]
+    pub fn draft_mut(&mut self) -> Option<&mut Draft> {
+        self.draft.as_mut()
+    }
+
+    /// Área do canvas que aparece na tela (a `Scene` centraliza `scene_rect`
+    /// e sobra espaço num dos eixos).
+    pub fn visible(&self) -> Rect {
+        let zoom = effective_zoom(self.viewport, self.scene_rect);
+        Rect::from_center_size(self.scene_rect.center(), self.viewport.size() / zoom)
+    }
+
+    /// Ponto do canvas → ponto da tela.
+    #[cfg(test)]
+    pub fn to_screen(&self, p: Pos2) -> Pos2 {
+        let zoom = effective_zoom(self.viewport, self.scene_rect);
+        self.viewport.center() + (p - self.visible().center()) * zoom
+    }
+
+    /// Resolve `place` com a vista deste frame: aproxima se o zoom deixaria o
+    /// texto miúdo (mantendo o ponto no mesmo lugar da tela) e mantém a
+    /// janela dentro da área visível.
+    fn place(&mut self, place: Placement) {
+        let Some(size) = self.draft.as_ref().map(Draft::size) else {
+            return;
+        };
+        let zoom = effective_zoom(self.viewport, self.scene_rect);
+        let mut visible = self.visible();
+        let anchor = match place {
+            Placement::Center => visible.center(),
+            Placement::At(p) => p,
+        };
+        if zoom < DRAFT_MIN_ZOOM {
+            let center = anchor + (visible.center() - anchor) * zoom;
+            visible = Rect::from_center_size(center, self.viewport.size());
+            self.scene_rect = visible;
+            self.update_detail(1.0);
+        }
+        let at = match place {
+            Placement::Center => anchor - size / 2.0,
+            Placement::At(p) => p,
+        };
+        let area = visible.shrink(16.0);
+        if let Some(d) = self.draft.as_mut() {
+            d.at = pos2(
+                at.x.min(area.right() - size.x).max(area.left()),
+                at.y.min(area.bottom() - size.y).max(area.top()),
+            );
+        }
     }
 
     fn zoom_by(&mut self, factor: f32) {
@@ -173,6 +294,7 @@ fn fit(cs: &mut CanvasState, model: &Model, focus: Option<SessionId>, outer: Rec
     cs.fit_now = false;
 }
 
+/// Desenha o canvas; devolve `Action::Created` quando o rascunho inicia.
 pub fn show(
     ui: &mut Ui,
     cx: &Ctx,
@@ -180,7 +302,7 @@ pub fn show(
     cs: &mut CanvasState,
     res: &mut Resources,
     dialogs: &mut super::dialogs::Dialogs,
-) {
+) -> Option<Action> {
     toolbar(ui, cx, st, cs, dialogs);
     let outer = ui.available_rect_before_wrap();
     // Janela/painel mudou de tamanho: reajusta se o usuário não assumiu o controle.
@@ -199,19 +321,25 @@ pub fn show(
     if cs.fit_now {
         fit(cs, cx.model, st.focus, outer);
     }
+    if let Some(place) = cs.place_draft.take() {
+        cs.place(place);
+    }
     let detailed = cs.detailed;
     let focus = st.focus;
     let layout = layout::layout(&specs(cx.model, |s| detailed || focus == Some(s)));
 
     let mut scene_rect = cs.scene_rect;
     let zoom = cs.zoom;
-    let response = Scene::new()
+    let draft = &mut cs.draft;
+    let scene = Scene::new()
         .zoom_range(ZOOM_MIN..=ZOOM_MAX)
         .max_inner_size(Vec2::splat(100_000.0))
         .show(ui, &mut scene_rect, |ui| {
-            draw(ui, cx, st, res, &layout, detailed, zoom);
-        })
-        .response;
+            draw(ui, cx, st, res, &layout, detailed, zoom, draft.is_none());
+            // Depois dos cards: fica por cima deles no desenho e no clique.
+            draft.as_mut().and_then(|d| d.show(ui, cx))
+        });
+    let response = scene.response;
     cs.scene_rect = scene_rect;
     if response.changed() {
         cs.auto_fit = false;
@@ -222,6 +350,46 @@ pub fn show(
     if response.clicked() {
         st.selected = None;
     }
+
+    // O fundo só recebe o botão direito fora dos cards e do rascunho.
+    if response.secondary_clicked()
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        cs.menu_at = pos;
+    }
+    let mut choice = None;
+    response.context_menu(|ui| choice = background_menu(ui));
+    if let Some(choice) = choice {
+        match choice {
+            MenuChoice::NewOrchestrator => {
+                let at = cs.menu_at;
+                cs.open_draft_with(cx.config, None, Placement::At(at));
+            }
+        }
+    }
+
+    match scene.inner? {
+        draft::Event::Cancel => {
+            cs.cancel_draft();
+            None
+        }
+        draft::Event::Start => {
+            let action = cs.draft.as_ref()?.start(cx, st);
+            if action.is_some() {
+                cs.draft = None;
+                cs.place_draft = None;
+            }
+            action
+        }
+    }
+}
+
+fn background_menu(ui: &mut Ui) -> Option<MenuChoice> {
+    let mut choice = None;
+    if ui.button("Iniciar novo agente orquestrador").clicked() {
+        choice = Some(MenuChoice::NewOrchestrator);
+    }
+    choice
 }
 
 fn toolbar(
@@ -311,6 +479,7 @@ fn dots(painter: &egui::Painter, clip: Rect, zoom: f32) {
     painter.extend(shapes);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw(
     ui: &mut Ui,
     cx: &Ctx,
@@ -319,9 +488,13 @@ fn draw(
     layout: &CanvasLayout,
     detailed: bool,
     zoom: f32,
+    empty_hint: bool,
 ) {
     dots(ui.painter(), ui.clip_rect(), zoom);
     if layout.sessions.is_empty() {
+        if !empty_hint {
+            return;
+        }
         let c = layout.bounds.center();
         let painter = ui.painter();
         painter.text(
