@@ -11,6 +11,7 @@ pub mod instance;
 pub mod layout;
 pub mod mock;
 pub mod model;
+pub mod places;
 pub mod sysinfo;
 pub mod term;
 pub mod theme;

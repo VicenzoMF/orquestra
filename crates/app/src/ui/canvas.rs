@@ -129,6 +129,21 @@ impl CanvasState {
         self.positions.insert(id, at);
     }
 
+    /// Posições de uma abertura anterior: valem quando as sessões reabertas
+    /// chegarem (até lá, ficam como pendentes).
+    pub fn restore_positions(&mut self, positions: &HashMap<SessionId, Pos2>) {
+        let now = Instant::now();
+        for (id, at) in positions {
+            self.positions.insert(*id, *at);
+            self.pending.insert(*id, now);
+        }
+    }
+
+    /// Onde cada sessão está, para guardar; `None` no meio de um arrasto.
+    pub fn settled_positions(&self) -> Option<&HashMap<SessionId, Pos2>> {
+        self.dragging.is_none().then_some(&self.positions)
+    }
+
     #[cfg(test)]
     pub fn position(&self, id: SessionId) -> Option<Pos2> {
         self.positions.get(&id).copied()

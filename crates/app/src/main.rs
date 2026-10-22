@@ -13,6 +13,7 @@ use orquestra_app::cli::{USAGE, UiArgs};
 use orquestra_app::feed::Shared;
 use orquestra_app::instance::{self, Instance, OpenRequest};
 use orquestra_app::mock::NullStore;
+use orquestra_app::places::Places;
 use orquestra_app::ui::OrquestraApp;
 use orquestra_browser::Chromium;
 use orquestra_core::{AppConfig, Command, History, Services, Store};
@@ -123,10 +124,15 @@ fn detach(request: &OpenRequest) -> anyhow::Result<()> {
 
 /// `<dados>/orquestra.log`, recomeçado a cada abertura.
 fn log_file() -> Option<File> {
-    let (db, _) = SqliteStore::default_paths()?;
-    let dir = db.parent()?;
-    std::fs::create_dir_all(dir).ok()?;
+    let dir = data_dir()?;
+    std::fs::create_dir_all(&dir).ok()?;
     File::create(dir.join("orquestra.log")).ok()
+}
+
+/// A pasta do banco (`~/.local/share/orquestra`).
+fn data_dir() -> Option<std::path::PathBuf> {
+    let (db, _) = SqliteStore::default_paths()?;
+    db.parent().map(Path::to_owned)
 }
 
 fn hand_off(dir: &Path, request: &OpenRequest) -> anyhow::Result<()> {
@@ -236,13 +242,18 @@ fn run(
         ..Default::default()
     };
     let ui_cmd = cmd.clone();
+    let places_file = data_dir().map(|dir| dir.join("canvas.json"));
     let result = eframe::run_native_ext(
         "orquestra",
         options,
         Some(egui_ctx),
         Box::new(move |cc| {
+            let mut app = OrquestraApp::new(cc, ui_cmd, shared, config);
+            if let Some(path) = places_file.filter(|_| !mock) {
+                app = app.with_places(Places::open(path));
+            }
             Ok(Box::new(FirstFrame {
-                app: OrquestraApp::new(cc, ui_cmd, shared, config),
+                app,
                 started,
                 logged: false,
             }))

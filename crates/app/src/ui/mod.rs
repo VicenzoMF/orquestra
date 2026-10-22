@@ -29,6 +29,7 @@ use crate::actions;
 use crate::feed::Shared;
 use crate::instance::OpenRequest;
 use crate::model::{BrowserState, Model};
+use crate::places::Places;
 use crate::sysinfo::RamMeter;
 use crate::term::view::{TermFont, ViewState};
 use crate::theme;
@@ -144,6 +145,8 @@ pub struct OrquestraApp {
     dialogs: dialogs::Dialogs,
     res: Resources,
     shutdown_sent: bool,
+    /// Onde as sessões ficam no canvas, guardado entre aberturas.
+    places: Option<Places>,
     #[cfg(feature = "screenshot")]
     dev: dev::DevHooks,
 }
@@ -181,9 +184,17 @@ impl OrquestraApp {
                 ram: RamMeter::default(),
             },
             shutdown_sent: false,
+            places: None,
             #[cfg(feature = "screenshot")]
             dev: dev::DevHooks::from_env(),
         }
+    }
+
+    /// Guarda e recupera as posições das sessões neste arquivo.
+    pub fn with_places(mut self, places: Places) -> Self {
+        self.canvas.restore_positions(places.positions());
+        self.places = Some(places);
+        self
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context, model: &Model) {
@@ -404,6 +415,11 @@ impl OrquestraApp {
             })
             .inner;
 
+        if let (Some(places), Some(positions)) =
+            (self.places.as_mut(), self.canvas.settled_positions())
+        {
+            places.save(positions);
+        }
         let mut actions = self.dialogs.show(&ctx, &cx, &mut self.st);
         actions.extend(created);
         reconcile_browsers(&mut self.st, &cx);
