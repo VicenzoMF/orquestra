@@ -172,7 +172,7 @@ fn orchestrations(
                 }
                 hint(
                     ui,
-                    "Ctrl+Shift+N nova orquestração\nCtrl+Shift+↑/↓ agente · Ctrl+Shift+B navegador",
+                    "Botão direito no canvas ou Ctrl+Shift+N: novo orquestrador\nCtrl+Shift+↑/↓ agente · Ctrl+Shift+B navegador",
                 );
             });
         }

@@ -6,7 +6,11 @@
 //! - `ORQUESTRA_DEMO_SELECT=nome`: seleciona o agente com esse nome;
 //! - `ORQUESTRA_DEMO_TAB=navegador`: abre a aba do navegador;
 //! - `ORQUESTRA_DEMO_FOCUS=prefixo`: foca a sessão cujo nome começa assim;
-//! - `ORQUESTRA_DEMO_DIALOG=nova|avulso|config`: abre um diálogo;
+//! - `ORQUESTRA_DEMO_MOVE=prefixo:x,y`: põe a moldura dessa sessão em (x, y)
+//!   e reenquadra;
+//! - `ORQUESTRA_DEMO_DIALOG=nova|nova-mais|avulso|config`: abre o rascunho
+//!   de orquestração no canvas (`nova-mais`: com todas as opções) ou um
+//!   diálogo;
 //! - `ORQUESTRA_DEMO_MENU=1`: abre a lista "Orquestrações" (`meio`: abre
 //!   pouco antes do screenshot, para pegar a animação no meio);
 //! - `ORQUESTRA_DEMO_ZOOM=fator`: zoom do canvas (ex.: `1.4`).
@@ -16,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use egui::ViewportCommand;
+use egui::{ViewportCommand, pos2};
 
 use super::canvas::CanvasState;
 use super::dialogs::Dialogs;
@@ -29,6 +33,8 @@ pub struct DevHooks {
     select: Option<String>,
     browser_tab: bool,
     focus: Option<String>,
+    /// Prefixo do nome da sessão e onde pôr a moldura.
+    place: Option<(String, egui::Pos2)>,
     dialog: Option<String>,
     menu: Option<String>,
     zoom: Option<f32>,
@@ -52,6 +58,14 @@ impl DevHooks {
             select: var("ORQUESTRA_DEMO_SELECT"),
             browser_tab: var("ORQUESTRA_DEMO_TAB").is_some_and(|t| t.starts_with("nav")),
             focus: var("ORQUESTRA_DEMO_FOCUS"),
+            place: var("ORQUESTRA_DEMO_MOVE").and_then(|v| {
+                let (prefix, at) = v.split_once(':')?;
+                let (x, y) = at.split_once(',')?;
+                Some((
+                    prefix.to_owned(),
+                    pos2(x.trim().parse().ok()?, y.trim().parse().ok()?),
+                ))
+            }),
             dialog: var("ORQUESTRA_DEMO_DIALOG"),
             menu: var("ORQUESTRA_DEMO_MENU"),
             zoom: var("ORQUESTRA_DEMO_ZOOM").and_then(|v| v.parse().ok()),
@@ -92,10 +106,34 @@ impl DevHooks {
                 canvas.zoom_to(zoom);
             }
             match self.dialog.as_deref() {
-                Some("nova") => dialogs.open_new_orchestration(cx.config),
+                Some(which @ ("nova" | "nova-mais")) => {
+                    // O `--mock` não tem recentes: usa a pasta da primeira sessão.
+                    let repo = cx
+                        .config
+                        .recent_repos
+                        .first()
+                        .cloned()
+                        .or_else(|| model.sessions().first().map(|s| s.config.repo.clone()));
+                    match repo {
+                        Some(repo) => canvas.open_draft_in(cx.config, &repo),
+                        None => canvas.open_draft(cx.config),
+                    }
+                    if let Some(d) = canvas.draft_mut() {
+                        d.more = which == "nova-mais";
+                    }
+                }
                 Some("avulso") => dialogs.open_solo(cx, st),
                 Some("config") => dialogs.open_settings(cx.config),
                 _ => {}
+            }
+            if let Some((prefix, at)) = &self.place
+                && let Some(s) = model
+                    .sessions()
+                    .into_iter()
+                    .find(|s| s.config.name.starts_with(prefix.as_str()))
+            {
+                canvas.set_position(s.id, *at);
+                canvas.request_fit();
             }
             if let Some(prefix) = &self.focus
                 && let Some(s) = model

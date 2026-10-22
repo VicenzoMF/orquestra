@@ -16,7 +16,7 @@ cargo install --path crates/app --locked   # instala `orq` (e o apelido `orquest
 Como o `code .` do VS Code:
 
 ```sh
-orq .                                # abre o repositório da pasta atual (diálogo pede o objetivo)
+orq .                                # abre o repositório da pasta atual (rascunho no canvas pede o objetivo)
 orq ~/projetos/loja -g "implemente o login"   # já começa a orquestração
 orq                                  # só abre (ou traz para a frente) a janela
 orq --mock                           # UI com agentes simulados

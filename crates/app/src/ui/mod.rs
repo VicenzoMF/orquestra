@@ -1,6 +1,6 @@
-//! App eframe: barra superior, canvas com os painéis flutuantes, painel do
-//! agente selecionado, barra de status e diálogos. Lê o `Model` (montado pela
-//! task de eventos) e só manda `Command`.
+//! App eframe: barra superior, canvas (com o rascunho de orquestração e os
+//! painéis flutuantes), painel do agente selecionado, barra de status e
+//! diálogos. Lê o `Model` (montado pela task de eventos) e só manda `Command`.
 
 mod bars;
 mod browser_view;
@@ -8,6 +8,7 @@ mod canvas;
 #[cfg(feature = "screenshot")]
 mod dev;
 mod dialogs;
+mod draft;
 mod overlay;
 mod side;
 mod widgets;
@@ -119,6 +120,12 @@ impl Ctx<'_> {
     }
 }
 
+/// O que a App aplica depois do frame (mexe na config local).
+pub enum Action {
+    SaveConfig(Box<AppConfig>),
+    Created { repo: PathBuf },
+}
+
 /// Texturas e caches do lado da UI.
 pub struct Resources {
     pub term_font: Option<TermFont>,
@@ -190,7 +197,7 @@ impl OrquestraApp {
             )
         });
         if new {
-            self.dialogs.open_new_orchestration(&self.config);
+            self.canvas.open_draft(&self.config);
         }
         if up || down {
             let order = model.canvas_order(self.st.focus);
@@ -215,10 +222,13 @@ impl OrquestraApp {
             };
             self.st.focus_terminal = self.st.tab == SideTab::Terminal;
         }
+        // O Esc já tirou o foco de um campo de texto (só o terminal e o
+        // navegador seguram o Esc): fecha o rascunho ou, sem ele, a seleção.
         let nothing_focused = ctx.memory(|m| m.focused().is_none());
         if nothing_focused
             && !self.dialogs.any_open()
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+            && !self.canvas.cancel_draft()
         {
             // Primeiro fecha a lista de orquestrações; depois, a seleção.
             if self.st.menu.open {
@@ -380,7 +390,7 @@ impl OrquestraApp {
                     )
                 });
         }
-        CentralPanel::default()
+        let created = CentralPanel::default()
             .frame(Frame::new().fill(theme::BG))
             .show(ui, |ui| {
                 canvas::show(
@@ -391,26 +401,28 @@ impl OrquestraApp {
                     &mut self.res,
                     &mut self.dialogs,
                 )
-            });
+            })
+            .inner;
 
-        let actions = self.dialogs.show(&ctx, &cx, &mut self.st);
+        let mut actions = self.dialogs.show(&ctx, &cx, &mut self.st);
+        actions.extend(created);
         reconcile_browsers(&mut self.st, &cx);
         drop(model);
         for action in actions {
             match action {
-                dialogs::Action::SaveConfig(config) => {
+                Action::SaveConfig(config) => {
                     shared.model().max_workers = config.orchestration.max_concurrent_workers;
                     shared.set_scrollback(config.ui.scrollback_lines);
                     self.config = *config.clone();
                     let _ = self.cmd.send(Command::SaveConfig(config));
                 }
-                dialogs::Action::Created { repo } => self.created(repo),
+                Action::Created { repo } => self.created(repo),
             }
         }
     }
 
-    /// Pedido do `orq`: abre o repositório (no diálogo, ou já a orquestração
-    /// quando veio com objetivo). Vindo de outro terminal, traz a janela para
+    /// Pedido do `orq`: abre o repositório (no rascunho do canvas, ou já a
+    /// orquestração quando veio com objetivo). Vindo de outro terminal, traz a janela para
     /// a frente (no X11 isso também a restaura); no Wayland o compositor não
     /// deixa, então ela pede atenção.
     fn open(&mut self, ctx: &egui::Context, request: OpenRequest, remote: bool) {
@@ -424,12 +436,12 @@ impl OrquestraApp {
             return;
         };
         let Some(goal) = request.goal.filter(|g| !g.trim().is_empty()) else {
-            self.dialogs.open_new_orchestration_in(&self.config, &repo);
+            self.canvas.open_draft_in(&self.config, &repo);
             return;
         };
         let Some(preset) = actions::default_orchestrator(&self.config) else {
-            warn!("nenhum preset pode orquestrar; abrindo o diálogo");
-            self.dialogs.open_new_orchestration_in(&self.config, &repo);
+            warn!("nenhum preset pode orquestrar; abrindo o rascunho");
+            self.canvas.open_draft_in(&self.config, &repo);
             return;
         };
         let session = SessionConfig::new(
@@ -444,12 +456,15 @@ impl OrquestraApp {
         }
         self.st.select_new(orchestrator);
         self.created(repo);
+        // Sem rascunho, a sessão vai para baixo das outras: reenquadra.
+        self.canvas.request_fit();
     }
 
-    /// Orquestração nova: o canvas reenquadra e o repositório vai para os recentes.
+    /// Orquestração nova: sai do foco de sessão e o repositório vai para os
+    /// recentes. A vista fica onde está: pelo rascunho, a moldura nasce onde
+    /// estava a janela.
     fn created(&mut self, repo: PathBuf) {
         self.st.focus = None;
-        self.canvas.request_fit();
         let recent = &mut self.config.recent_repos;
         recent.retain(|r| *r != repo);
         recent.insert(0, repo);
@@ -494,9 +509,10 @@ fn setup_style(ctx: &egui::Context, config: &AppConfig) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::time::Duration;
 
-    use egui::{RawInput, Rect, pos2, vec2};
+    use egui::{Event, PointerButton, Pos2, RawInput, Rect, pos2, vec2};
     use orquestra_core::AppConfig;
 
     use super::*;
@@ -504,23 +520,96 @@ mod tests {
     use crate::feed::lock;
 
     fn frame(ctx: &egui::Context, app: &mut OrquestraApp) {
+        frame_with(ctx, app, Vec::new());
+    }
+
+    fn frame_with(ctx: &egui::Context, app: &mut OrquestraApp, events: Vec<Event>) {
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1440.0, 900.0))),
+            events,
             ..RawInput::default()
         };
         let mut out = ctx.run_ui(input, |ui| app.draw(ui));
         out.textures_delta.clear();
     }
 
-    /// Pedidos do `orq`: sem objetivo, o diálogo abre já no repositório; com
-    /// objetivo, a orquestração começa e o repositório vai para os recentes.
-    #[test]
-    fn open_requests_from_orq() {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
+    /// Tecla apertada e solta no mesmo frame.
+    fn key(ctx: &egui::Context, app: &mut OrquestraApp, key: Key, modifiers: Modifiers) {
+        let event = |pressed| Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        };
+        frame_with(
+            ctx,
+            app,
+            vec![
+                Event::ModifiersChanged(modifiers),
+                event(true),
+                event(false),
+                Event::ModifiersChanged(Modifiers::NONE),
+            ],
+        );
+    }
+
+    fn type_text(ctx: &egui::Context, app: &mut OrquestraApp, text: &str) {
+        frame_with(ctx, app, vec![Event::Text(text.to_owned())]);
+    }
+
+    /// Clique (um frame para apertar, outro para soltar) num ponto da tela.
+    fn click(ctx: &egui::Context, app: &mut OrquestraApp, pos: Pos2, button: PointerButton) {
+        let event = |pressed| Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        frame_with(ctx, app, vec![Event::PointerMoved(pos)]);
+        frame_with(ctx, app, vec![event(true)]);
+        frame_with(ctx, app, vec![event(false)]);
+    }
+
+    /// Arrasta com o botão principal de `from` a `to`, em alguns frames.
+    fn drag(ctx: &egui::Context, app: &mut OrquestraApp, from: Pos2, to: Pos2) {
+        let button = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        frame_with(ctx, app, vec![Event::PointerMoved(from)]);
+        frame_with(ctx, app, vec![button(from, true)]);
+        for t in [0.1, 0.4, 0.7, 1.0] {
+            let pos = from + (to - from) * t;
+            frame_with(ctx, app, vec![Event::PointerMoved(pos)]);
+        }
+        frame_with(ctx, app, vec![button(to, false)]);
+        frame(ctx, app);
+    }
+
+    fn wait_sessions(ctx: &egui::Context, app: &mut OrquestraApp, shared: &Shared, n: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while shared.model().sessions().len() < n {
+            assert!(std::time::Instant::now() < deadline, "sessão não apareceu");
+            frame(ctx, app);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Hub com os mocks (`seed`: com as duas sessões de demonstração) e a
+    /// App sem janela.
+    fn mock_app(
+        runtime: &tokio::runtime::Runtime,
+        seed: bool,
+    ) -> (
+        egui::Context,
+        OrquestraApp,
+        Arc<Shared>,
+        CommandSender,
+        tokio::task::JoinHandle<()>,
+    ) {
         let config = AppConfig::default();
         let Backend {
             bus: _bus,
@@ -528,7 +617,7 @@ mod tests {
             events,
             frames,
             hub,
-        } = backend::start_mock(runtime.handle(), &config, 0.02, false).unwrap();
+        } = backend::start_mock(runtime.handle(), &config, 0.02, seed).unwrap();
         let shared = Shared::new(8, 500);
         backend::spawn_ui_feeds(
             runtime.handle(),
@@ -539,38 +628,15 @@ mod tests {
             Arc::new(|| {}),
         );
         let ctx = egui::Context::default();
-        let mut app = OrquestraApp::with_context(&ctx, cmd.clone(), shared.clone(), config);
+        let app = OrquestraApp::with_context(&ctx, cmd.clone(), shared.clone(), config);
+        (ctx, app, shared, cmd, hub)
+    }
 
-        let loja = OpenRequest {
-            repo: Some("/src/loja".into()),
-            goal: None,
-        };
-        shared.push_open(loja, true);
-        frame(&ctx, &mut app);
-        assert_eq!(app.dialogs.new_orchestration_repo(), Some("/src/loja"));
-        assert!(shared.model().sessions().is_empty());
-
-        app.dialogs = dialogs::Dialogs::default();
-        let blog = OpenRequest {
-            repo: Some("/src/blog".into()),
-            goal: Some("migrar para Astro".to_owned()),
-        };
-        shared.push_open(blog, false);
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while shared.model().sessions().is_empty() {
-            assert!(std::time::Instant::now() < deadline, "sessão não apareceu");
-            frame(&ctx, &mut app);
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        {
-            let model = shared.model();
-            let session = &model.sessions()[0].config;
-            assert_eq!(session.repo, PathBuf::from("/src/blog"));
-            assert_eq!(session.goal, "migrar para Astro");
-        }
-        assert!(!app.dialogs.any_open());
-        assert_eq!(app.config.recent_repos[0], PathBuf::from("/src/blog"));
-
+    fn shutdown(
+        runtime: &tokio::runtime::Runtime,
+        cmd: &CommandSender,
+        hub: tokio::task::JoinHandle<()>,
+    ) {
         cmd.send(Command::Shutdown).unwrap();
         runtime
             .block_on(async { tokio::time::timeout(Duration::from_secs(5), hub).await })
@@ -578,34 +644,261 @@ mod tests {
             .unwrap();
     }
 
-    /// A UI inteira, sem janela, sobre o hub real com os mocks semeados:
-    /// canvas, painel com terminal e navegador, foco de sessão e diálogos.
-    #[test]
-    fn whole_ui_renders_over_the_mock_hub() {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
-            .unwrap();
-        let config = AppConfig::default();
-        let Backend {
-            bus: _bus,
-            cmd,
-            events,
-            frames,
-            hub,
-        } = backend::start_mock(runtime.handle(), &config, 0.02, true).unwrap();
-        let shared = Shared::new(8, 500);
-        backend::spawn_ui_feeds(
-            runtime.handle(),
-            events,
-            frames,
-            cmd.clone(),
-            shared.clone(),
-            Arc::new(|| {}),
+            .unwrap()
+    }
+
+    /// Pedidos do `orq`: sem objetivo, o rascunho abre no canvas já na pasta;
+    /// com objetivo, a orquestração começa e a pasta vai para os recentes.
+    #[test]
+    fn open_requests_from_orq() {
+        let runtime = runtime();
+        let (ctx, mut app, shared, cmd, hub) = mock_app(&runtime, false);
+
+        let loja = OpenRequest {
+            repo: Some("/src/loja".into()),
+            goal: None,
+        };
+        shared.push_open(loja, true);
+        frame(&ctx, &mut app);
+        let draft = app.canvas.draft().expect("rascunho não abriu");
+        assert_eq!(draft.repo(), "/src/loja");
+        assert!(!draft.more, "com a pasta, o rascunho abre compacto");
+        assert!(!app.dialogs.any_open());
+        assert!(shared.model().sessions().is_empty());
+
+        app.canvas.cancel_draft();
+        let blog = OpenRequest {
+            repo: Some("/src/blog".into()),
+            goal: Some("migrar para Astro".to_owned()),
+        };
+        shared.push_open(blog, false);
+        wait_sessions(&ctx, &mut app, &shared, 1);
+        {
+            let model = shared.model();
+            let session = &model.sessions()[0].config;
+            assert_eq!(session.repo, PathBuf::from("/src/blog"));
+            assert_eq!(session.goal, "migrar para Astro");
+        }
+        assert!(app.canvas.draft().is_none());
+        assert!(!app.dialogs.any_open());
+        assert_eq!(app.config.recent_repos[0], PathBuf::from("/src/blog"));
+
+        shutdown(&runtime, &cmd, hub);
+    }
+
+    /// O rascunho pelo teclado: Shift+Enter quebra a linha, abrir de novo
+    /// mantém o texto, Enter inicia com a pasta e o objetivo (e a pasta vai
+    /// para os recentes); Esc fecha um rascunho sem criar nada.
+    #[test]
+    fn draft_starts_an_orchestration() {
+        let runtime = runtime();
+        let (ctx, mut app, shared, cmd, hub) = mock_app(&runtime, false);
+        frame(&ctx, &mut app);
+
+        app.canvas
+            .open_draft_in(&app.config, Path::new("/src/loja"));
+        frame(&ctx, &mut app);
+        type_text(&ctx, &mut app, "login");
+        key(&ctx, &mut app, Key::Enter, Modifiers::SHIFT);
+        type_text(&ctx, &mut app, "com e-mail");
+        assert!(app.canvas.draft().is_some());
+        assert!(shared.model().sessions().is_empty());
+
+        // De novo (Ctrl+Shift+N): o mesmo rascunho, com o texto.
+        key(
+            &ctx,
+            &mut app,
+            Key::N,
+            Modifiers::COMMAND | Modifiers::SHIFT,
         );
-        let ctx = egui::Context::default();
-        let mut app = OrquestraApp::with_context(&ctx, cmd.clone(), shared.clone(), config);
+        frame(&ctx, &mut app);
+        // A moldura da sessão nova fica onde estava a janela, e a vista não
+        // pula: nem ao iniciar, nem quando a sessão e o orquestrador chegam.
+        let at = pos2(640.0, 420.0);
+        app.canvas.draft_mut().unwrap().at = at;
+        let view = app.canvas.scene_rect;
+        key(&ctx, &mut app, Key::Enter, Modifiers::NONE);
+        assert!(app.canvas.draft().is_none(), "Enter não iniciou");
+        wait_sessions(&ctx, &mut app, &shared, 1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while shared.model().agent_count() < 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "orquestrador não chegou"
+            );
+            frame(&ctx, &mut app);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        frame(&ctx, &mut app);
+        assert_eq!(app.canvas.scene_rect, view, "a vista pulou ao iniciar");
+        {
+            let model = shared.model();
+            let session = &model.sessions()[0];
+            assert_eq!(session.config.repo, PathBuf::from("/src/loja"));
+            assert_eq!(session.config.goal, "login\ncom e-mail");
+            assert_eq!(session.config.name, "loja · login");
+            assert_eq!(app.st.selected, session.orchestrator);
+            assert_eq!(app.canvas.position(session.id), Some(at));
+            let frame = app.canvas.session_frame(&model, session.id).unwrap();
+            assert_eq!(frame.min, at);
+        }
+        assert_eq!(app.config.recent_repos[0], PathBuf::from("/src/loja"));
+
+        // Um rascunho novo já vem com a pasta recente; Esc fecha.
+        app.canvas.open_draft(&app.config);
+        frame(&ctx, &mut app);
+        assert_eq!(app.canvas.draft().map(|d| d.repo()), Some("/src/loja"));
+        key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+        assert!(app.canvas.draft().is_none(), "Esc não fechou");
+        frame(&ctx, &mut app);
+        assert_eq!(shared.model().sessions().len(), 1);
+
+        shutdown(&runtime, &cmd, hub);
+    }
+
+    /// Botão direito no fundo do canvas: menu com "Iniciar novo agente
+    /// orquestrador", que abre o rascunho onde foi o clique.
+    #[test]
+    fn right_click_on_the_canvas_opens_the_draft() {
+        let runtime = runtime();
+        let (ctx, mut app, _shared, cmd, hub) = mock_app(&runtime, false);
+        for _ in 0..2 {
+            frame(&ctx, &mut app);
+        }
+        let at = pos2(200.0, 300.0);
+        click(&ctx, &mut app, at, PointerButton::Secondary);
+        assert!(egui::Popup::is_any_open(&ctx), "menu não abriu");
+        assert!(app.canvas.draft().is_none());
+        // O menu sai no ponteiro; o item é a primeira linha dele.
+        click(
+            &ctx,
+            &mut app,
+            at + vec2(60.0, 18.0),
+            PointerButton::Primary,
+        );
+        frame(&ctx, &mut app);
+        assert!(!egui::Popup::is_any_open(&ctx), "menu não fechou");
+        let draft = app.canvas.draft().expect("o item não abriu o rascunho");
+        assert!(draft.more, "sem recentes, as opções já vêm à mostra");
+        assert!(
+            app.canvas.visible().contains_rect(draft.rect()),
+            "rascunho fora da área visível"
+        );
+        // O canto fica no ponto do clique (coube na tela).
+        let corner = app.canvas.to_screen(draft.rect().min);
+        assert!(
+            (corner - at).length() < 1.0,
+            "canto em {corner:?}, clique em {at:?}"
+        );
+        // O cursor já está no objetivo.
+        type_text(&ctx, &mut app, "login");
+        let draft = app.canvas.draft().unwrap();
+        assert_eq!(
+            draft.session(&app.config).err(),
+            Some("Falta a pasta do repositório")
+        );
+
+        shutdown(&runtime, &cmd, hub);
+    }
+
+    /// Arrastar o cabeçalho de uma moldura move a sessão sem fazer pan (e
+    /// arrastar o fundo faz); clique simples no cabeçalho continua focando.
+    /// Arrastar o título do rascunho move o rascunho.
+    #[test]
+    fn dragging_headers_moves_sessions_and_the_draft() {
+        let runtime = runtime();
+        let (ctx, mut app, shared, cmd, hub) = mock_app(&runtime, false);
+        frame(&ctx, &mut app);
+        // Com objetivo: entra sem posição e ganha uma automática, em (0, 0).
+        shared.push_open(
+            OpenRequest {
+                repo: Some("/src/loja".into()),
+                goal: Some("login".to_owned()),
+            },
+            false,
+        );
+        wait_sessions(&ctx, &mut app, &shared, 1);
+        // O orquestrador e os workers do plano simulado chegam depois da
+        // sessão, e cada um reenquadra a vista: espera todos, senão o
+        // reenquadramento cai no meio do arrasto.
+        let name = shared.model().sessions()[0].config.name.clone();
+        let agents = crate::mock::director::plan_for(&name).len() + 1;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while shared.model().agent_count() < agents {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "agentes do plano não chegaram"
+            );
+            frame(&ctx, &mut app);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for _ in 0..3 {
+            frame(&ctx, &mut app);
+        }
+        let id = shared.model().sessions()[0].id;
+        assert_eq!(app.canvas.position(id), Some(Pos2::ZERO));
+        app.st.selected = None;
+        frame(&ctx, &mut app);
+
+        let view = app.canvas.scene_rect;
+        let zoom = app.canvas.zoom;
+        let grab = app.canvas.to_screen(pos2(300.0, 14.0));
+        drag(&ctx, &mut app, grab, grab + vec2(120.0, 80.0));
+        let moved = app.canvas.position(id).unwrap();
+        let expected = vec2(120.0, 80.0) / zoom;
+        assert!(
+            (moved.to_vec2() - expected).length() < 1.0,
+            "foi para {moved:?}, esperava {expected:?}"
+        );
+        assert_eq!(app.canvas.scene_rect, view, "o canvas fez pan");
+        assert_eq!(app.st.focus, None, "arrastar não é clique");
+        let frame_now = app.canvas.session_frame(&shared.model(), id).unwrap();
+        assert_eq!(frame_now.min, moved);
+
+        // Clique simples no cabeçalho foca, como antes.
+        let header = app.canvas.to_screen(moved + vec2(300.0, 14.0));
+        click(&ctx, &mut app, header, PointerButton::Primary);
+        assert_eq!(app.st.focus, Some(id));
+        app.st.focus = None;
+
+        // Arrastar o fundo, à esquerda da moldura, faz pan e não move a sessão.
+        let empty = app.canvas.to_screen(moved + vec2(-100.0, 40.0));
+        drag(&ctx, &mut app, empty, empty + vec2(-50.0, -30.0));
+        assert_ne!(app.canvas.scene_rect, view, "o fundo não fez pan");
+        assert_eq!(app.canvas.position(id), Some(moved));
+
+        // O título do rascunho arrasta a janela.
+        app.canvas.open_draft(&app.config);
+        frame(&ctx, &mut app);
+        frame(&ctx, &mut app);
+        let view = app.canvas.scene_rect;
+        let zoom = app.canvas.zoom;
+        let before = app.canvas.draft().unwrap().at;
+        let title = app.canvas.to_screen(before + vec2(150.0, 24.0));
+        drag(&ctx, &mut app, title, title + vec2(-90.0, 60.0));
+        let after = app.canvas.draft().unwrap().at;
+        let expected = vec2(-90.0, 60.0) / zoom;
+        assert!(
+            (after - before - expected).length() < 1.0,
+            "rascunho foi de {before:?} para {after:?}"
+        );
+        assert_eq!(app.canvas.scene_rect, view);
+
+        shutdown(&runtime, &cmd, hub);
+    }
+
+    /// A UI inteira, sem janela, sobre o hub real com os mocks semeados:
+    /// canvas, painel com terminal e navegador, foco de sessão, rascunho e
+    /// diálogos.
+    #[test]
+    fn whole_ui_renders_over_the_mock_hub() {
+        let runtime = runtime();
+        let (ctx, mut app, shared, cmd, hub) = mock_app(&runtime, true);
 
         // Espera as duas sessões com todos os workers.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -617,6 +910,28 @@ mod tests {
         for _ in 0..3 {
             frame(&ctx, &mut app);
         }
+
+        // A segunda sessão posta à direita da primeira fica lá; posta por
+        // cima dela, desce só na exibição (a posição guardada não muda).
+        let (a, b) = {
+            let model = shared.model();
+            (model.sessions()[0].id, model.sessions()[1].id)
+        };
+        let fa = app.canvas.session_frame(&shared.model(), a).unwrap();
+        let right = pos2(fa.right() + 80.0, fa.top());
+        app.canvas.set_position(b, right);
+        frame(&ctx, &mut app);
+        let fb = app.canvas.session_frame(&shared.model(), b).unwrap();
+        assert_eq!(fb.min, right);
+        let over = fa.min + vec2(100.0, 60.0);
+        app.canvas.set_position(b, over);
+        frame(&ctx, &mut app);
+        let fb = app.canvas.session_frame(&shared.model(), b).unwrap();
+        assert_eq!(fb.left(), over.x);
+        assert_eq!(fb.top(), fa.bottom() + crate::layout::SESSION_GAP);
+        assert_eq!(app.canvas.position(b), Some(over));
+        app.canvas.request_fit();
+        frame(&ctx, &mut app);
 
         // Seleciona o agente com navegador: terminal redimensiona ao painel.
         let qa = {
@@ -651,24 +966,55 @@ mod tests {
         frame(&ctx, &mut app);
         assert!(!app.st.streaming.contains(&qa));
 
-        // Foco numa sessão (cards detalhados) e os diálogos.
+        // Foco numa sessão (cards detalhados).
         let first = shared.model().sessions()[0].id;
         app.st.focus = Some(first);
         app.canvas.request_fit();
         frame(&ctx, &mut app);
         app.st.selected = None;
         frame(&ctx, &mut app);
-        app.dialogs.open_new_orchestration(&app.config);
+
+        // Rascunho no canvas, compacto e depois com todas as opções; fica na
+        // área visível, legível, e a vista não se reajusta sozinha.
+        app.canvas
+            .open_draft_in(&app.config, Path::new("/src/loja"));
         frame(&ctx, &mut app);
-        app.dialogs = dialogs::Dialogs::default();
+        frame(&ctx, &mut app);
+        let compact = app.canvas.draft().unwrap().rect();
+        assert!(app.canvas.visible().contains_rect(compact));
+        assert!(app.canvas.zoom >= 0.8);
+        app.canvas.draft_mut().unwrap().more = true;
+        frame(&ctx, &mut app);
+        frame(&ctx, &mut app);
+        let expanded = app.canvas.draft().unwrap().rect();
+        assert_eq!(expanded.min, compact.min, "a janela cresce para baixo");
+        assert!(expanded.height() > compact.height() + 150.0);
+        // Uma sessão nova chega com o rascunho aberto: a vista fica onde está.
+        app.st.focus = None;
+        frame(&ctx, &mut app);
+        let view = app.canvas.scene_rect;
+        let api = SessionConfig::new("api", "/src/api", "documentar a API");
+        let preset = &app.config.presets[0];
+        let (_, _, commands) =
+            actions::new_orchestration(&app.config, api, preset, TermSize::default());
+        for c in commands {
+            cmd.send(c).unwrap();
+        }
+        wait_sessions(&ctx, &mut app, &shared, 3);
+        frame(&ctx, &mut app);
+        assert_eq!(
+            app.canvas.scene_rect, view,
+            "a vista pulou com o rascunho aberto"
+        );
+        // Cancelar devolve o ajuste automático que havia antes.
+        app.canvas.cancel_draft();
+        frame(&ctx, &mut app);
+        assert_ne!(app.canvas.scene_rect, view);
+
         app.dialogs.open_settings(&app.config);
         frame(&ctx, &mut app);
         assert!(app.dialogs.any_open());
 
-        cmd.send(Command::Shutdown).unwrap();
-        runtime
-            .block_on(async { tokio::time::timeout(Duration::from_secs(5), hub).await })
-            .expect("hub não encerrou")
-            .unwrap();
+        shutdown(&runtime, &cmd, hub);
     }
 }

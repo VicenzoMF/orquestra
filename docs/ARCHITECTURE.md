@@ -58,8 +58,9 @@ de `core`; `app` depende de todos. O binário `orq` (com o apelido
     segunda instância feche as sessões da primeira como interrompidas.
   - Sem instância, o `orq` sobe a UI noutro processo, em sessão própria e
     com o log em `<dados>/orquestra.log`, e devolve o terminal.
-  - A pasta vira a raiz do repositório git. Sem objetivo, abre o diálogo
-    preenchido; com objetivo, já cria a orquestração.
+  - A pasta vira a raiz do repositório git. Sem objetivo, abre o rascunho
+    de orquestração no canvas já com a pasta; com objetivo, já cria a
+    orquestração.
   - Pedido vindo de outro terminal traz a janela para a frente. No Wayland o
     compositor não deixa: a janela pede atenção.
 - `orq mcp`: a ponte stdio do MCP, que o CLI do orquestrador sobe;
@@ -247,7 +248,9 @@ O modo `--mock` é a mesma montagem com serviços falsos do agente C.
 
 ## 5. Sequências
 
-**Nova orquestração.** A UI manda `CreateSession`. Depois manda `Spawn` do
+**Nova orquestração.** A pessoa escreve o objetivo no rascunho do canvas
+(§6, app) e aperta Enter ou "Iniciar". A UI manda `CreateSession`. Depois
+manda `Spawn` do
 orquestrador (`role: Orchestrator`, `Workspace::Directory { repo }`,
 `initial_prompt = orchestration.render_prompt(&session)`). O hub pede ao
 gateway um `grant`: credencial, spec do MCP `orquestra` e `stop_hook`. O
@@ -406,11 +409,46 @@ os agentes, visíveis ou não, então sempre responde.
       setas a partir da destacada + Enter (é o caso do aviso de confiança na
       pasta);
     - pergunta de uma linha terminada em `(s/n)` ou `[Y/n]`.
-  - Layout automático em árvore, sem persistência no MVP.
+  - Cada moldura fica onde a pessoa a pôs. As posições ficam só no app
+    (`CanvasState`): as sessões não sobrevivem a um reinício, então nada vai
+    para o store. A posição some quando a sessão sai do modelo.
+    - "Iniciar" põe o canto da moldura onde estava o rascunho. Sessão sem
+      posição (`orq <pasta> -g`, mocks) ganha uma na primeira vez que
+      aparece: x = 0, logo abaixo da moldura mais baixa. Daí em diante fica
+      fixa como as outras.
+    - Arrastar o cabeçalho move a sessão inteira, sem pan do canvas; clique
+      simples nele foca, como antes. Arrastar o título do rascunho move o
+      rascunho.
+  - `layout.rs` é uma função pura: recebe a origem de cada sessão e monta a
+    árvore dentro da moldura. Molduras nunca se sobrepõem: a que cruza outra
+    mais acima (faixas de x se cruzando, a menos de `SESSION_GAP` na
+    vertical) desce só na exibição, sem mudar a posição guardada, e volta
+    quando a de cima encolhe.
+  - Botão direito no fundo (também dentro de uma moldura, fora dos cards)
+    abre um menu; por enquanto, só "Iniciar novo agente orquestrador".
+  - **Rascunho de orquestração** (`ui/draft.rs`): uma janela no estilo dos
+    cards, desenhada dentro da `Scene`, então acompanha pan e zoom. Abre no
+    ponto do botão direito ou, por "+ Nova orquestração", Ctrl+Shift+N e
+    `orq <pasta>`, no centro da área visível. Há um por vez: abrir de novo
+    só o reposiciona, com o texto. Enquanto ele está aberto, o canvas não se
+    reajusta sozinho; com zoom abaixo de 80%, ele abre aproximando a vista.
+    - Compacto: objetivo (Enter inicia, Shift+Enter quebra a linha, Esc
+      cancela) e um resumo como `~/projetos/loja · Claude Code`.
+    - "Mostrar mais opções": orquestrador, pasta (com os recentes), limite de
+      agentes simultâneos, tipos de agente, navegador e aprovação. Sem pasta
+      recente, ele já abre assim.
+    - Sem ComboBox lá dentro: o popup sai no lugar certo, mas em escala 1:1,
+      e destoa da janela com zoom. Preset e recentes são escolhas inline.
+    - "Iniciar" manda `CreateSession` + `Spawn`, guarda a posição da sessão
+      nova (o `SessionId` vem de `actions::new_orchestration`), seleciona o
+      orquestrador e põe a pasta nos recentes. A vista não se mexe e o
+      ajuste automático segue desligado: a orquestração aparece onde a janela
+      estava.
 - **Topo.** Pills de sessão (Todas / cada sessão, com resumo) e
-  "+ Nova orquestração".
+  "+ Nova orquestração" (abre o rascunho no canvas).
 - **Painéis flutuantes** (`ui/overlay`), fixos na tela sobre o canvas; o
-  enquadramento automático deixa livres as faixas de cima e de baixo:
+  enquadramento automático deixa livres as faixas de cima e de baixo (e não
+  aproxima além de 100%; o zoom manual vai até 150%):
   - **Orquestrações** (canto de cima à esquerda): um botão que abre a lista,
     uma orquestração de cada vez (cascata), com focar, orquestrador e
     encerrar. Esc ou clique no canvas fecha;
@@ -429,8 +467,9 @@ os agentes, visíveis ou não, então sempre responde.
 - **Navegador.** O JPEG é decodificado fora da thread de UI. A textura só é
   atualizada quando chega quadro novo. O input passa por `to_viewport`.
   `SetBrowserVisible` liga e desliga o screencast conforme o painel.
-- **Atalhos.** Ctrl+Shift+N (nova), Ctrl+Shift+↑/↓ (agente), Ctrl+Shift+B
-  (navegador). Com o terminal em foco, tudo mais vai para o PTY.
+- **Atalhos.** Ctrl+Shift+N (rascunho de orquestração), Ctrl+Shift+↑/↓
+  (agente), Ctrl+Shift+B (navegador), Esc (fecha o rascunho ou a seleção).
+  Com o terminal em foco, tudo mais vai para o PTY.
 
 ## 7. Layout
 

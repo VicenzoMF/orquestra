@@ -2,7 +2,7 @@
 //! SQLite nem MCP (modo `--mock`).
 
 mod browser;
-mod director;
+pub(crate) mod director;
 mod font;
 mod runner;
 mod script;
