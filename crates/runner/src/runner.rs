@@ -27,6 +27,7 @@ use tracing::{debug, warn};
 use crate::command::{CommandSpec, build_command};
 use crate::process::{SIGKILL, SIGTERM, signal_tree};
 use crate::replay::ReplayRing;
+use crate::resume;
 use crate::status::{DetectorConfig, ProcessExit, StatusDetector};
 use crate::worktree;
 
@@ -245,6 +246,13 @@ impl Inner {
                     )));
                 }
                 // O worktree já existe: falhar aqui não o apaga.
+                if !resume::has_conversation(&req) {
+                    // A conversa nunca começou: abre do começo, com a tarefa
+                    // inicial (se havia).
+                    let mut fresh = req.clone();
+                    fresh.config.workspace = Workspace::Directory { path: path.clone() };
+                    return self.launch(&fresh, path, worktree.clone());
+                }
                 self.launch(&req, path, worktree.clone())
             }
             Workspace::Worktree { repo, base, branch } => {

@@ -68,6 +68,9 @@ Worktrees em `../orquestra-worktrees/<crate>`, branches `phase1/<crate>`.
       tarefa; as instruções de delegação (em inglês) vão escondidas no
       prompt de sistema (`--append-system-prompt` / `developer_instructions`),
       testado com o Claude real. Instruções e ferramentas do MCP em inglês
+- [x] Fechar a sessão pela moldura (× e botão direito no cabeçalho); um
+      agente que nunca conversou reabre do começo em vez de falhar no
+      `--resume`
 
 ## Próximos passos sugeridos
 - [ ] Testar a reabertura com o Codex real

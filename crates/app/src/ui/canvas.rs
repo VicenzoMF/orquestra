@@ -74,6 +74,14 @@ pub struct CanvasState {
     dragging: Option<(SessionId, Pos2)>,
 }
 
+/// O que as molduras das sessões pediram neste frame.
+#[derive(Default)]
+struct FrameInput {
+    drag: Option<HeaderDrag>,
+    /// O × ou "Fechar sessão" no menu do cabeçalho.
+    close: Option<SessionId>,
+}
+
 /// O cabeçalho de uma moldura está sendo arrastado neste frame.
 struct HeaderDrag {
     session: SessionId,
@@ -457,11 +465,14 @@ pub fn show(
         sharpen_text(ui.ctx(), layer, to_screen.scaling);
     }
     let response = scene.response;
-    let (drag, event) = scene.inner;
+    let (frames, event) = scene.inner;
     cs.scene_rect = scene_rect;
+    if let Some(id) = frames.close {
+        dialogs.close_session(cx, st, id);
+    }
 
     // A posição guardada parte de onde a moldura aparecia ao começar.
-    match drag {
+    match frames.drag {
         Some(d) => {
             let from = match cs.dragging {
                 Some((id, from)) if id == d.session => from,
@@ -694,11 +705,12 @@ fn draw(
     detailed: bool,
     zoom: f32,
     empty_hint: bool,
-) -> Option<HeaderDrag> {
+) -> FrameInput {
+    let mut input = FrameInput::default();
     dots(ui.painter(), ui.clip_rect(), zoom);
     if layout.sessions.is_empty() {
         if !empty_hint {
-            return None;
+            return input;
         }
         let c = layout.bounds.center();
         let painter = ui.painter();
@@ -723,17 +735,16 @@ fn draw(
             FontId::proportional(12.5),
             theme::TEXT_DIM,
         );
-        return None;
+        return input;
     }
     let visible = ui.clip_rect();
-    let mut drag = None;
     for sl in &layout.sessions {
         let Some(session) = cx.model.session(sl.id) else {
             continue;
         };
         let dim = st.focus.is_some_and(|f| f != sl.id);
         let session_detailed = detailed || st.focus == Some(sl.id);
-        let dragged = ui
+        let (dragged, close) = ui
             .scope(|ui| {
                 if dim {
                     ui.multiply_opacity(0.3);
@@ -750,9 +761,12 @@ fn draw(
                 )
             })
             .inner;
-        drag = drag.or(dragged);
+        input.drag = input.drag.or(dragged);
+        if close {
+            input.close = Some(sl.id);
+        }
     }
-    drag
+    input
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -765,7 +779,7 @@ fn draw_session(
     sl: &SessionLayout,
     detailed: bool,
     visible: Rect,
-) -> Option<HeaderDrag> {
+) -> (Option<HeaderDrag>, bool) {
     let painter = ui.painter().clone();
     let frame = sl.frame;
     painter.rect(
@@ -777,20 +791,29 @@ fn draw_session(
     );
 
     // Cabeçalho: nome, repositório e resumo. Clique foca a sessão; arrastar
-    // move a moldura inteira (o canvas não faz pan).
+    // move a moldura inteira (o canvas não faz pan); botão direito, o menu.
     let header = Rect::from_min_size(frame.min, vec2(frame.width(), layout::HEADER_H - 8.0));
     let header_resp = ui.interact(
         header,
         Id::unique(("session-header", sl.id)),
         Sense::click_and_drag(),
     );
+    let focused = st.focus == Some(sl.id);
     if header_resp.clicked() {
-        st.focus = if st.focus == Some(sl.id) {
-            None
-        } else {
-            Some(sl.id)
-        };
+        st.focus = if focused { None } else { Some(sl.id) };
     }
+    let mut close = false;
+    header_resp.context_menu(|ui| {
+        if ui
+            .button(if focused { "Ver todas" } else { "Focar" })
+            .clicked()
+        {
+            st.focus = if focused { None } else { Some(sl.id) };
+        }
+        if ui.button("Fechar sessão").clicked() {
+            close = true;
+        }
+    });
     let drag = header_resp.total_drag_delta().map(|total| HeaderDrag {
         session: sl.id,
         frame_min: frame.min,
@@ -804,6 +827,18 @@ fn draw_session(
             .on_hover_text("Clique para focar; arraste para mover");
     }
     let y = frame.top() + 22.0;
+    // Depois do cabeçalho: fica por cima dele no clique.
+    let close_rect = Rect::from_center_size(pos2(frame.right() - 22.0, y), Vec2::splat(22.0));
+    let close_resp = ui
+        .interact(
+            close_rect,
+            Id::unique(("session-close", sl.id)),
+            Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Fechar sessão (a pasta não é tocada)");
+    close_x(&painter, close_rect, close_resp.hovered());
+    close |= close_resp.clicked();
     let name_rect = painter.text(
         pos2(frame.left() + 18.0, y),
         Align2::LEFT_CENTER,
@@ -813,7 +848,7 @@ fn draw_session(
     );
     let c = cx.model.counts(Some(sl.id));
     let (summary, kind) = cx.model.session_summary(sl.id);
-    let right = frame.right() - 18.0;
+    let right = close_rect.left() - 6.0;
     let summary_rect = painter.text(
         pos2(right, y),
         Align2::RIGHT_CENTER,
@@ -869,7 +904,24 @@ fn draw_session(
             worker_card(ui, cx, st, res, agent, *rect, detailed);
         }
     }
-    drag
+    (drag, close)
+}
+
+/// O × de fechar, com fundo ao passar o mouse.
+fn close_x(painter: &egui::Painter, rect: Rect, hovered: bool) {
+    if hovered {
+        painter.rect_filled(rect, CornerRadius::same(5), theme::BORDER);
+    }
+    let color = if hovered {
+        theme::TEXT
+    } else {
+        theme::TEXT_DIM
+    };
+    let c = rect.center();
+    let d = 4.5;
+    let stroke = Stroke::new(1.6, color);
+    painter.line_segment([c + vec2(-d, -d), c + vec2(d, d)], stroke);
+    painter.line_segment([c + vec2(-d, d), c + vec2(d, -d)], stroke);
 }
 
 fn draw_edge(painter: &egui::Painter, edge: &Edge, child: &AgentView) {

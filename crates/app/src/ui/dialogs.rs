@@ -91,6 +91,21 @@ impl Dialogs {
         });
     }
 
+    /// Fecha a sessão: vazia, na hora; com agentes, depois de confirmar.
+    pub fn close_session(&mut self, cx: &Ctx, st: &mut UiState, id: SessionId) {
+        if cx.model.session(id).is_some_and(|s| !s.agents.is_empty()) {
+            self.confirm = Some(Confirm::close_session(id));
+            return;
+        }
+        cx.send(Command::CloseSession {
+            id,
+            cleanup: WorktreeCleanup::Keep,
+        });
+        if st.focus == Some(id) {
+            st.focus = None;
+        }
+    }
+
     pub fn open_settings(&mut self, config: &AppConfig) {
         self.settings = Some(Settings {
             font_size: config.ui.font_size,
@@ -322,8 +337,10 @@ fn confirm(ui: &mut Ui, cx: &Ctx, st: &mut UiState, c: &mut Confirm, close: &mut
                 .map_or_else(|| "agente".to_owned(), |a| a.config.name.clone());
             title(ui, &format!("Remover {name}?"));
             ui.label("Encerra o processo, fecha o navegador e esquece o agente.");
-            ui.add_space(4.0);
-            cleanup_choice(ui, cleanup);
+            if cx.model.agent(*agent).is_some_and(|a| a.has_worktree()) {
+                ui.add_space(4.0);
+                cleanup_choice(ui, cleanup);
+            }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui
@@ -345,18 +362,27 @@ fn confirm(ui: &mut Ui, cx: &Ctx, st: &mut UiState, c: &mut Confirm, close: &mut
             });
         }
         Confirm::CloseSession { session, cleanup } => {
-            let name = cx
-                .model
-                .session(*session)
-                .map_or_else(|| "orquestração".to_owned(), |s| s.config.name.clone());
-            title(ui, &format!("Encerrar {name}?"));
-            ui.label("Remove todos os agentes desta orquestração.");
-            ui.add_space(4.0);
-            cleanup_choice(ui, cleanup);
+            let view = cx.model.session(*session);
+            let name = view.map_or_else(|| "sessão".to_owned(), |s| s.config.name.clone());
+            title(ui, &format!("Fechar {name}?"));
+            ui.label(
+                "Encerra os agentes desta sessão e a tira do canvas. \
+                 A pasta e os arquivos dela não são apagados.",
+            );
+            let worktrees = view.is_some_and(|s| {
+                s.agents
+                    .iter()
+                    .filter_map(|a| cx.model.agent(*a))
+                    .any(|a| a.has_worktree())
+            });
+            if worktrees {
+                ui.add_space(4.0);
+                cleanup_choice(ui, cleanup);
+            }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui
-                    .add(widgets::tinted_button("Encerrar", theme::FAILED))
+                    .add(widgets::tinted_button("Fechar sessão", theme::FAILED))
                     .clicked()
                 {
                     cx.send(Command::CloseSession {

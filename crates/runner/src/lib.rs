@@ -9,6 +9,7 @@
 mod command;
 mod process;
 mod replay;
+mod resume;
 mod runner;
 mod status;
 mod worktree;

@@ -328,9 +328,11 @@ espera o recorder dar `flush`; só depois vêm `runner.shutdown` e
 sem `closed_at` e os agentes não removidos, com o último status. O app manda
 `CreateSession` (mesmo id) e um `Restore` por agente, em ordem de criação.
 - O Claude Code nasce com `--session-id <id do agente>`, e o `Restore` o sobe
-  com `--resume <id>`: a conversa volta inteira. O Codex volta com `codex
-  resume --last` na pasta do agente (com dois Codex na mesma pasta, pode
-  trocar).
+  com `--resume <id>`: a conversa volta inteira. Ele só grava a conversa
+  depois da primeira mensagem; sem ela (`<config>/projects/*/<id>.jsonl`), o
+  runner abre do começo, com `--session-id` e a tarefa inicial. O Codex
+  volta com `codex resume --last` na pasta do agente (com dois Codex na
+  mesma pasta, pode trocar).
 - O orquestrador ganha credencial nova no spawn; o gateway refaz o estado
   pelos eventos.
 - A primeira espera de um agente reaberto (nos primeiros 30 s) e os
@@ -456,6 +458,10 @@ sem `closed_at` e os agentes não removidos, com o último status. O app manda
     - Arrastar o cabeçalho move a sessão inteira, sem pan do canvas; clique
       simples nele foca, como antes. Arrastar o título do rascunho move o
       rascunho.
+    - O × no canto do cabeçalho (e "Fechar sessão", no botão direito dele)
+      fecha a sessão: vazia, na hora; com agentes, depois de confirmar (as
+      opções de worktree só aparecem se algum agente tem um). A pasta não é
+      tocada.
   - `layout.rs` é uma função pura: recebe a origem de cada sessão e monta a
     árvore dentro da moldura. Molduras nunca se sobrepõem: a que cruza outra
     mais acima (faixas de x se cruzando, a menos de `SESSION_GAP` na
@@ -492,7 +498,7 @@ sem `closed_at` e os agentes não removidos, com o último status. O app manda
   enquadramento automático deixa livres as faixas de cima e de baixo (e não
   aproxima além de 100%; o zoom manual vai até 150%):
   - **Sessões** (canto de cima à esquerda): um botão que abre a lista, uma
-    sessão de cada vez (cascata), com focar, o agente dela e encerrar. Esc ou
+    sessão de cada vez (cascata), com focar, o agente dela e fechar. Esc ou
     clique no canvas fecha;
   - **Precisa de você** (canto de cima à direita, recolhível; só aparece com
     algo pendente): input, aprovação e falhas de todas as sessões;

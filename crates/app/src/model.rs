@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use orquestra_core::{
     AgentConfig, AgentEvent, AgentId, AgentInfo, AgentRole, AgentStatus, BrowserStatus,
-    QueueReason, SessionConfig, SessionId,
+    QueueReason, SessionConfig, SessionId, Workspace,
 };
 
 /// Quantos erros recentes o modelo guarda (para a barra de status).
@@ -123,6 +123,19 @@ impl AgentView {
 
     pub fn is_orchestrator(&self) -> bool {
         self.config.role == AgentRole::Orchestrator
+    }
+
+    /// Trabalha (ou vai trabalhar, se ainda na fila) num worktree próprio.
+    pub fn has_worktree(&self) -> bool {
+        self.info.as_ref().is_some_and(|i| i.worktree.is_some())
+            || matches!(
+                &self.config.workspace,
+                Workspace::Worktree { .. }
+                    | Workspace::Restore {
+                        worktree: Some(_),
+                        ..
+                    }
+            )
     }
 }
 

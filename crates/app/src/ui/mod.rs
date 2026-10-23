@@ -521,7 +521,7 @@ mod tests {
     use std::time::Duration;
 
     use egui::{Event, PointerButton, Pos2, RawInput, Rect, pos2, vec2};
-    use orquestra_core::{AppConfig, Workspace};
+    use orquestra_core::{AppConfig, SessionConfig, Workspace};
 
     use super::*;
     use crate::backend::{self, Backend};
@@ -854,6 +854,81 @@ mod tests {
         type_text(&ctx, &mut app, "login");
         let draft = app.canvas.draft().unwrap();
         assert_eq!(draft.spec(&app.config).err(), Some("Falta a pasta"));
+
+        shutdown(&runtime, &cmd, hub);
+    }
+
+    /// O × da moldura fecha uma sessão vazia na hora; com agentes, pergunta
+    /// antes. O botão direito no cabeçalho abre o menu dela.
+    #[test]
+    fn closing_a_session_from_its_frame() {
+        let runtime = runtime();
+        let (ctx, mut app, shared, cmd, hub) = mock_app(&runtime, false);
+        frame(&ctx, &mut app);
+        let empty = SessionId::generate();
+        cmd.send(Command::CreateSession {
+            id: empty,
+            config: Box::new(SessionConfig::new("vazia", "/src/vazia", "")),
+        })
+        .unwrap();
+        wait_sessions(&ctx, &mut app, &shared, 1);
+        frame(&ctx, &mut app);
+        let close_button = |app: &OrquestraApp, id| {
+            let f = app.canvas.session_frame(&shared.model(), id).unwrap();
+            app.canvas.to_screen(pos2(f.right() - 22.0, f.top() + 22.0))
+        };
+
+        let header = app.canvas.to_screen(
+            app.canvas
+                .session_frame(&shared.model(), empty)
+                .unwrap()
+                .min
+                + vec2(60.0, 14.0),
+        );
+        click(&ctx, &mut app, header, PointerButton::Secondary);
+        assert!(
+            egui::Popup::is_any_open(&ctx),
+            "menu do cabeçalho não abriu"
+        );
+        key(&ctx, &mut app, Key::Escape, Modifiers::NONE);
+
+        let at = close_button(&app, empty);
+        click(&ctx, &mut app, at, PointerButton::Primary);
+        assert!(app.dialogs.confirm.is_none(), "vazia fecha sem perguntar");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !shared.model().sessions().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "a sessão não fechou");
+            frame(&ctx, &mut app);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        shared.push_open(
+            OpenRequest {
+                repo: Some("/src/loja".into()),
+                goal: Some("login".to_owned()),
+            },
+            false,
+        );
+        wait_sessions(&ctx, &mut app, &shared, 1);
+        let busy = shared.model().sessions()[0].id;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while shared.model().agent_count() == 0 {
+            assert!(std::time::Instant::now() < deadline, "o agente não chegou");
+            frame(&ctx, &mut app);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        app.canvas.request_fit();
+        frame(&ctx, &mut app);
+        let at = close_button(&app, busy);
+        click(&ctx, &mut app, at, PointerButton::Primary);
+        assert!(
+            matches!(
+                app.dialogs.confirm,
+                Some(dialogs::Confirm::CloseSession { session, .. }) if session == busy
+            ),
+            "com agentes, pergunta antes"
+        );
+        assert_eq!(shared.model().sessions().len(), 1);
 
         shutdown(&runtime, &cmd, hub);
     }

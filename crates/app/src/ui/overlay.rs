@@ -355,7 +355,7 @@ fn session_card(
         painter.rect_filled(fill, CornerRadius::same(2), theme::DONE);
     }
 
-    // Botões: [Focar][Orquestrador] ... [Encerrar…].
+    // Botões: [Focar][Agente] ... [Fechar].
     let button = |from: f32, width: f32| {
         Rect::from_min_size(pos2(from, rect.top() + 66.0), vec2(width, 24.0))
     };
@@ -378,10 +378,10 @@ fn session_card(
     }
     let end = button(right - 84.0, 84.0);
     if ui
-        .put(end, widgets::tinted_button("Encerrar…", theme::FAILED))
+        .put(end, widgets::tinted_button("Fechar", theme::FAILED))
         .clicked()
     {
-        dialogs.confirm = Some(Confirm::close_session(session.id));
+        dialogs.close_session(cx, st, session.id);
     }
     if close {
         st.menu.set(false, now);
